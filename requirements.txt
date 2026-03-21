@@ -1,0 +1,11 @@
+torch
+transformers>=4.44.0
+accelerate
+flask
+flask-cors
+pillow
+langchain
+langchain-community
+chromadb
+sentence-transformers
+pypdf

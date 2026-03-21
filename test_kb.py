@@ -1,21 +1,40 @@
+import argparse
+
 from rag_retriever import AncientArchitectureRAG
 
-# 初始化RAG
-rag = AncientArchitectureRAG()
 
-# 测试检索
-test_questions = [
-    "斗拱",
-    "营造法式",
-    "佛光寺",
-    "材分制"
-]
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="测试知识库检索效果")
+    parser.add_argument(
+        "--vector-db-path",
+        default=None,
+        help="知识库目录，不传时读取环境变量 VECTOR_DB_PATH",
+    )
+    parser.add_argument(
+        "--question",
+        action="append",
+        dest="questions",
+        help="要测试的问题，可多次传入",
+    )
+    return parser.parse_args()
 
-for q in test_questions:
-    print(f"\n🔍 问题: {q}")
-    print("="*50)
-    context = rag.get_context(q)
-    if context:
-        print(f"✅ 找到相关段落:\n{context[:500]}...")
-    else:
-        print("❌ 没有找到相关内容")
+
+if __name__ == "__main__":
+    args = parse_args()
+    questions = args.questions or [
+        "斗拱是什么？",
+        "《营造法式》的作用是什么？",
+        "佛光寺有什么价值？",
+        "中国古建筑常见木结构特点有哪些？",
+    ]
+
+    rag = AncientArchitectureRAG(vector_db_path=args.vector_db_path)
+
+    for question in questions:
+        print(f"\n问题: {question}")
+        print("=" * 60)
+        context = rag.get_context(question)
+        if context:
+            print(context[:800])
+        else:
+            print("没有检索到相关内容。")
