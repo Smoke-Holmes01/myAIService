@@ -1,0 +1,18 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 日志文件
+*.log
+
+# 测试数据
+test_base64.txt
+
+# 环境配置
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
