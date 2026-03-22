@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>中国古建筑 AI 小助手</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="page-shell">
+        <aside class="hero-panel">
+            <div class="hero-copy">
+                <p class="eyebrow">Chinese Ancient Architecture AI</p>
+                <h1>中国古建筑<br>智能识别与问答助手</h1>
+                <p class="hero-text">
+                    支持文本问答、古建筑图片识别和风格分析。页面将直接调用本地部署的千问多模态模型服务。
+                </p>
+            </div>
+
+            <div class="status-card">
+                <div class="status-top">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span id="status-text">正在检测服务状态...</span>
+                </div>
+                <div class="status-meta" id="status-meta">尚未获取服务信息</div>
+            </div>
+
+            <div class="feature-list">
+                <div class="feature-item">
+                    <span class="feature-index">01</span>
+                    <div>
+                        <h2>文本问答</h2>
+                        <p>输入古建筑相关问题，获得结构、用途、风格与历史方面的回答。</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-index">02</span>
+                    <div>
+                        <h2>图片识别</h2>
+                        <p>上传建筑图片，自动识别建筑类型并分析可见的风格特征。</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-index">03</span>
+                    <div>
+                        <h2>本地部署</h2>
+                        <p>前端页面与 Python 接口同源运行，适合比赛现场快速演示。</p>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <main class="chat-panel">
+            <header class="chat-header">
+                <div>
+                    <p class="panel-kicker">现场演示</p>
+                    <h2>与古建筑 AI 对话</h2>
+                </div>
+                <button class="ghost-button" id="clear-chat" type="button">清空对话</button>
+            </header>
+
+            <section class="messages" id="messages">
+                <article class="message assistant">
+                    <div class="message-badge">AI</div>
+                    <div class="message-body">
+                        <p>你好，我可以帮你回答中国古建筑问题，也可以识别建筑图片并概括风格特点。</p>
+                        <p class="message-hint">可以试试：“请介绍一下斗拱的作用” 或上传一张古建筑照片。</p>
+                    </div>
+                </article>
+            </section>
+
+            <section class="composer-panel">
+                <div class="preview-card hidden" id="image-preview-card">
+                    <img id="image-preview" alt="待识别图片预览">
+                    <div class="preview-copy">
+                        <strong>已选择图片</strong>
+                        <span id="image-name">未选择文件</span>
+                    </div>
+                    <button class="ghost-button small" id="remove-image" type="button">移除</button>
+                </div>
+
+                <form id="chat-form" class="composer-form">
+                    <label class="upload-box" for="image-input">
+                        <input id="image-input" type="file" accept="image/*">
+                        <span>上传图片</span>
+                        <small>支持建筑识别</small>
+                    </label>
+
+                    <div class="input-stack">
+                        <textarea
+                            id="question-input"
+                            rows="4"
+                            placeholder="请输入问题，例如：请介绍一下斗拱的作用，或结合图片说明建筑风格。"
+                            required
+                        ></textarea>
+                        <div class="composer-actions">
+                            <p class="helper-text" id="helper-text">模型回复可能需要几十秒，请耐心等待。</p>
+                            <button class="submit-button" id="submit-button" type="submit">发送问题</button>
+                        </div>
+                    </div>
+                </form>
+            </section>
+        </main>
+    </div>
+
+    <template id="message-template">
+        <article class="message">
+            <div class="message-badge"></div>
+            <div class="message-body"></div>
+        </article>
+    </template>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

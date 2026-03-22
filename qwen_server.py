@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 from PIL import Image, UnidentifiedImageError
 from transformers import (
@@ -206,6 +206,11 @@ def load_model() -> bool:
             logger.exception("RAG 检索器加载失败，服务将以纯模型模式运行")
 
     return True
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return render_template("index.html")
 
 
 @app.route("/api/ai/health", methods=["GET"])
