@@ -3,7 +3,10 @@ import io
 import json
 import logging
 import os
+import sys
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -89,6 +92,8 @@ model = None
 tokenizer = None
 processor = None
 rag: Optional[AncientArchitectureRAG] = None
+image_matcher = None
+image_matcher_error: Optional[str] = None
 
 
 def resolve_input_device() -> torch.device:
@@ -111,6 +116,111 @@ def decode_image(image_base64: str) -> Image.Image:
     payload = image_base64.split(",", 1)[-1] if "," in image_base64 else image_base64
     image_bytes = base64.b64decode(payload)
     return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+
+def _parse_top_k(value, default: int = 3) -> int:
+    if value in {None, ""}:
+        return default
+    try:
+        return min(max(int(value), 1), 10)
+    except (TypeError, ValueError):
+        return default
+
+
+def _matcher_project_root() -> Path:
+    return (Path(__file__).resolve().parents[1] / "compterdesign").resolve()
+
+
+def _matcher_render_root() -> Path:
+    return _matcher_project_root() / "outputs" / "renders"
+
+
+def get_image_matcher():
+    global image_matcher, image_matcher_error
+
+    if image_matcher is not None:
+        return image_matcher
+
+    if image_matcher_error is not None:
+        raise RuntimeError(image_matcher_error)
+
+    project_root = _matcher_project_root()
+    if not project_root.exists():
+        image_matcher_error = f"Matcher project not found: {project_root}"
+        raise RuntimeError(image_matcher_error)
+
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    try:
+        from matcher_service import SingleImageMatcher
+        from matcher_service import SingleImageMatcherConfig
+
+        image_matcher = SingleImageMatcher(
+            SingleImageMatcherConfig(
+                project_root=project_root,
+                render_root=project_root / "outputs" / "renders",
+                query_root=project_root / "outputs" / "agent_queries",
+            )
+        )
+        return image_matcher
+    except Exception as exc:
+        image_matcher_error = f"Failed to initialize image matcher: {exc}"
+        logger.exception("Image matcher initialization failed")
+        raise RuntimeError(image_matcher_error) from exc
+
+
+def _format_match_answer(match_result: dict) -> str:
+    matches = match_result.get("matches", [])
+    if not matches:
+        return "No matching model was found."
+
+    best_match = matches[0]
+    lines = [
+        "I matched the uploaded image against the pre-rendered 3D model library.",
+        f"Best match: model {best_match['model_name']} (score {best_match['score']:.4f}).",
+        "Top candidates:",
+    ]
+
+    for index, item in enumerate(matches, start=1):
+        view = item.get("best_view", {})
+        lines.append(
+            f"{index}. model {item['model_name']} | score {item['score']:.4f} | "
+            f"azimuth {view.get('azimuth')} | elevation {view.get('elevation')}"
+        )
+
+    return "\n".join(lines)
+
+
+def _run_match_pipeline(question: str, image_base64: str, top_k: int) -> dict:
+    image = decode_image(image_base64)
+    matcher = get_image_matcher()
+
+    upload_root = Path(__file__).resolve().parent / "tmp_uploads"
+    upload_root.mkdir(parents=True, exist_ok=True)
+
+    query_id = f"agent_{uuid.uuid4().hex[:12]}"
+    upload_path = upload_root / f"{query_id}.png"
+    image.save(upload_path)
+
+    try:
+        match_result = matcher.match_image(
+            image_path=str(upload_path),
+            top_k=top_k,
+            query_id=query_id,
+        )
+    finally:
+        if upload_path.exists():
+            upload_path.unlink()
+
+    return {
+        "question": question,
+        "answer": _format_match_answer(match_result),
+        "used_knowledge": False,
+        "has_image": True,
+        "used_matcher": True,
+        "match_result": match_result,
+    }
 
 
 def build_messages(question: str, context: str, image: Optional[Image.Image]) -> list[dict]:
@@ -223,8 +333,38 @@ def health():
             "rag_loaded": rag is not None,
             "model_path": config.model_path,
             "device": str(resolve_input_device()),
+            "matcher_render_root": str(_matcher_render_root()),
+            "matcher_assets_ready": _matcher_render_root().exists(),
+            "matcher_error": image_matcher_error,
         }
     )
+
+
+@app.route("/api/agent/match", methods=["POST"])
+def agent_match():
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question", "")).strip()
+    image_base64 = data.get("image")
+    top_k = _parse_top_k(data.get("top_k"), default=3)
+
+    if not image_base64:
+        return jsonify({"error": "image is required"}), 400
+
+    try:
+        response_body = _run_match_pipeline(question=question, image_base64=image_base64, top_k=top_k)
+        return app.response_class(
+            response=json.dumps(response_body, ensure_ascii=False),
+            mimetype="application/json",
+        )
+    except (ValueError, UnidentifiedImageError, OSError):
+        logger.exception("Image decode failed for matcher route")
+        return jsonify({"error": "image is not a valid base64 image"}), 400
+    except RuntimeError as exc:
+        logger.exception("Matcher route is unavailable")
+        return jsonify({"error": str(exc)}), 503
+    except Exception:
+        logger.exception("Matcher route failed")
+        return jsonify({"error": "internal server error"}), 500
 
 
 @app.route("/api/ai/chat", methods=["POST"])

@@ -71,6 +71,27 @@ function clearImageSelection() {
   elements.previewName.textContent = "未选择文件";
 }
 
+function shouldUseMatcher(question, hasImage) {
+  if (!hasImage) {
+    return false;
+  }
+
+  const matcherKeywords = [
+    "match",
+    "matcher",
+    "3d",
+    "obj",
+    "mesh",
+    "model",
+    "匹配",
+    "模型",
+    "三维",
+    "对应",
+  ];
+  const normalizedQuestion = String(question || "").toLowerCase();
+  return matcherKeywords.some((keyword) => normalizedQuestion.includes(keyword));
+}
+
 async function updateHealthStatus() {
   try {
     const response = await fetch("/api/ai/health");
@@ -143,7 +164,10 @@ elements.form.addEventListener("submit", async (event) => {
   setPendingState(true);
 
   try {
-    const response = await fetch("/api/ai/chat", {
+    const useMatcher = shouldUseMatcher(question, Boolean(selectedImageBase64));
+    const endpoint = useMatcher ? "/api/agent/match" : "/api/ai/chat";
+
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -151,6 +175,7 @@ elements.form.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         question,
         image: selectedImageBase64 || undefined,
+        use_matcher: useMatcher,
       }),
     });
 
@@ -159,9 +184,13 @@ elements.form.addEventListener("submit", async (event) => {
       throw new Error(data.error || "请求失败");
     }
 
-    const answer = data.used_knowledge
+    let answer = data.used_knowledge
       ? `${data.answer}\n\n[本次回答已结合知识库检索结果]`
       : `${data.answer}\n\n[本次回答基于模型直接生成]`;
+
+    if (data.used_matcher) {
+      answer = `${data.answer}\n\n[This result came from the compterdesign matcher.]`;
+    }
 
     loadingMessage.querySelector(".message-body").textContent = answer;
     loadingMessage.classList.remove("loading");
