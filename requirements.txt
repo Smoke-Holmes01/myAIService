@@ -4,6 +4,7 @@ accelerate
 flask
 flask-cors
 pillow
+openai>=1.0.0
 numpy>=1.24
 scipy>=1.10
 opencv-python-headless>=4.8

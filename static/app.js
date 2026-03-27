@@ -96,7 +96,7 @@ async function updateHealthStatus() {
   try {
     const response = await fetch("/api/ai/health");
     const data = await response.json();
-    const isOnline = response.ok && data.model_loaded;
+    const isOnline = response.ok && data.status === "up";
     const status = isOnline ? "服务在线，可开始演示" : "服务未就绪";
 
     elements.statusDot.classList.remove("offline", "online");

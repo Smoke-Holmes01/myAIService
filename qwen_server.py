@@ -7,23 +7,31 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from typing import Optional
 
 import torch
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
-from PIL import Image, UnidentifiedImageError
-from transformers import (
-    AutoProcessor,
-    AutoTokenizer,
-    Qwen2_5_VLForConditionalGeneration,
-)
+from openai import OpenAI
+from PIL import Image
+from PIL import UnidentifiedImageError
+from transformers import AutoProcessor
+from transformers import AutoTokenizer
+from transformers import Qwen2_5_VLForConditionalGeneration
 
 from rag_retriever import AncientArchitectureRAG
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -33,7 +41,7 @@ def _get_env_int(name: str, default: int) -> int:
     try:
         return int(value)
     except ValueError:
-        logger.warning("环境变量 %s=%r 不是合法整数，回退为 %s", name, value, default)
+        logger.warning("Invalid integer env %s=%r, fallback to %s", name, value, default)
         return default
 
 
@@ -44,7 +52,7 @@ def _get_env_float(name: str, default: float) -> float:
     try:
         return float(value)
     except ValueError:
-        logger.warning("环境变量 %s=%r 不是合法浮点数，回退为 %s", name, value, default)
+        logger.warning("Invalid float env %s=%r, fallback to %s", name, value, default)
         return default
 
 
@@ -60,7 +68,7 @@ def _get_torch_dtype(name: str) -> torch.dtype:
         "fp32": torch.float32,
     }
     if normalized not in mapping:
-        logger.warning("未知 TORCH_DTYPE=%r，回退为 bfloat16", name)
+        logger.warning("Unknown TORCH_DTYPE=%r, fallback to bfloat16", name)
         return torch.bfloat16
     return mapping[normalized]
 
@@ -70,16 +78,20 @@ class ServerConfig:
     model_path: str = os.getenv("MODEL_PATH", "/home/yy/models/qwen2.5-vl-72b")
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = _get_env_int("PORT", 11435)
+    use_remote_api: bool = _get_env_bool("USE_REMOTE_API", bool(os.getenv("SILICONFLOW_API_KEY")))
+    siliconflow_api_key: str = os.getenv("SILICONFLOW_API_KEY", "")
+    siliconflow_base_url: str = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+    siliconflow_model: str = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
     torch_dtype: torch.dtype = _get_torch_dtype(os.getenv("TORCH_DTYPE", "bfloat16"))
     max_new_tokens: int = _get_env_int("MAX_NEW_TOKENS", 512)
     temperature: float = _get_env_float("TEMPERATURE", 0.7)
     top_p: float = _get_env_float("TOP_P", 0.9)
     default_system_prompt: str = os.getenv(
         "SYSTEM_PROMPT",
-        "你是一位专业的中国古建筑 AI 助手。请优先结合检索到的资料回答，"
-        "回答时保持准确、清晰；如果资料不足，请明确说明不确定。",
+        "你是一位专业的中国古建筑 AI 助手。请优先结合可用资料作答，表达清晰，"
+        "如果信息不足请明确说明不确定。",
     )
-    enable_rag: bool = os.getenv("ENABLE_RAG", "true").lower() not in {"0", "false", "no"}
+    enable_rag: bool = _get_env_bool("ENABLE_RAG", True)
 
 
 config = ServerConfig()
@@ -94,22 +106,38 @@ processor = None
 rag: Optional[AncientArchitectureRAG] = None
 image_matcher = None
 image_matcher_error: Optional[str] = None
+remote_client: Optional[OpenAI] = None
 
 
-def resolve_input_device() -> torch.device:
+def _remote_api_enabled() -> bool:
+    return config.use_remote_api and bool(config.siliconflow_api_key)
+
+
+def _service_mode() -> str:
+    if _remote_api_enabled():
+        return "remote_api"
+    if model is not None:
+        return "local_model"
+    return "degraded"
+
+
+def resolve_input_device() -> str:
+    if _remote_api_enabled():
+        return "remote-api"
+
     if model is None:
-        return torch.device("cpu")
+        return "cpu"
 
     try:
-        return next(model.parameters()).device
+        return str(next(model.parameters()).device)
     except StopIteration:
         pass
 
     model_device = getattr(model, "device", None)
     if model_device is not None:
-        return torch.device(model_device)
+        return str(model_device)
 
-    return torch.device("cpu")
+    return "cpu"
 
 
 def decode_image(image_base64: str) -> Image.Image:
@@ -118,7 +146,7 @@ def decode_image(image_base64: str) -> Image.Image:
     return Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
 
-def _parse_top_k(value, default: int = 3) -> int:
+def _parse_top_k(value: Any, default: int = 3) -> int:
     if value in {None, ""}:
         return default
     try:
@@ -133,6 +161,84 @@ def _matcher_project_root() -> Path:
 
 def _matcher_render_root() -> Path:
     return _matcher_project_root() / "outputs" / "renders"
+
+
+def get_remote_client() -> OpenAI:
+    global remote_client
+
+    if not _remote_api_enabled():
+        raise RuntimeError("Remote API is not enabled. Please set SILICONFLOW_API_KEY.")
+
+    if remote_client is None:
+        remote_client = OpenAI(
+            api_key=config.siliconflow_api_key,
+            base_url=config.siliconflow_base_url,
+        )
+
+    return remote_client
+
+
+def _build_remote_messages(question: str, context: str, image_base64: Optional[str]) -> list[dict[str, Any]]:
+    if context:
+        user_text = f"参考资料：\n{context}\n\n问题：{question}"
+    else:
+        user_text = question
+
+    if not image_base64:
+        return [
+            {"role": "system", "content": config.default_system_prompt},
+            {"role": "user", "content": user_text},
+        ]
+
+    return [
+        {"role": "system", "content": config.default_system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_base64}},
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+
+def _extract_remote_answer_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")).strip())
+                continue
+
+            item_type = getattr(item, "type", None)
+            if item_type == "text":
+                parts.append(str(getattr(item, "text", "")).strip())
+
+        return "\n".join(part for part in parts if part).strip()
+
+    return str(content).strip()
+
+
+def generate_remote_answer(question: str, context: str, image_base64: Optional[str]) -> str:
+    client = get_remote_client()
+    response = client.chat.completions.create(
+        model=config.siliconflow_model,
+        messages=_build_remote_messages(question=question, context=context, image_base64=image_base64),
+        max_tokens=config.max_new_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+    )
+
+    if not response.choices:
+        raise RuntimeError("Remote API returned no choices.")
+
+    answer = _extract_remote_answer_content(response.choices[0].message.content)
+    if not answer:
+        raise RuntimeError("Remote API returned an empty answer.")
+    return answer
 
 
 def get_image_matcher():
@@ -170,7 +276,7 @@ def get_image_matcher():
         raise RuntimeError(image_matcher_error) from exc
 
 
-def _format_match_answer(match_result: dict) -> str:
+def _format_match_answer(match_result: dict[str, Any]) -> str:
     matches = match_result.get("matches", [])
     if not matches:
         return "No matching model was found."
@@ -192,7 +298,7 @@ def _format_match_answer(match_result: dict) -> str:
     return "\n".join(lines)
 
 
-def _run_match_pipeline(question: str, image_base64: str, top_k: int) -> dict:
+def _run_match_pipeline(question: str, image_base64: str, top_k: int) -> dict[str, Any]:
     image = decode_image(image_base64)
     matcher = get_image_matcher()
 
@@ -223,7 +329,7 @@ def _run_match_pipeline(question: str, image_base64: str, top_k: int) -> dict:
     }
 
 
-def build_messages(question: str, context: str, image: Optional[Image.Image]) -> list[dict]:
+def build_messages(question: str, context: str, image: Optional[Image.Image]) -> list[dict[str, Any]]:
     if context:
         user_text = f"参考资料：\n{context}\n\n问题：{question}"
     else:
@@ -247,7 +353,7 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
     ]
 
 
-def generate_answer(messages: list[dict], image: Optional[Image.Image]) -> str:
+def generate_answer(messages: list[dict[str, Any]], image: Optional[Image.Image]) -> str:
     input_device = resolve_input_device()
 
     if image is None:
@@ -285,12 +391,39 @@ def generate_answer(messages: list[dict], image: Optional[Image.Image]) -> str:
     return decoded[0].strip()
 
 
+def _load_rag_if_enabled() -> Optional[AncientArchitectureRAG]:
+    if not config.enable_rag:
+        return None
+
+    try:
+        loaded_rag = AncientArchitectureRAG()
+        logger.info("RAG retriever loaded successfully")
+        return loaded_rag
+    except Exception:
+        logger.exception("RAG retriever failed to load; continuing without RAG")
+        return None
+
+
 def load_model() -> bool:
     global model, tokenizer, processor, rag
-    logger.info("正在加载模型: %s", config.model_path)
+
+    rag = _load_rag_if_enabled()
+
+    if _remote_api_enabled():
+        logger.info(
+            "Remote API mode enabled. Using SiliconFlow model %s via %s",
+            config.siliconflow_model,
+            config.siliconflow_base_url,
+        )
+        model = None
+        tokenizer = None
+        processor = None
+        return True
+
+    logger.info("Loading local model from: %s", config.model_path)
 
     if not os.path.exists(config.model_path):
-        logger.error("模型路径不存在: %s", config.model_path)
+        logger.error("Local model path does not exist: %s", config.model_path)
         return False
 
     try:
@@ -302,20 +435,11 @@ def load_model() -> bool:
             torch_dtype=config.torch_dtype,
             trust_remote_code=True,
         )
-        logger.info("模型加载成功")
+        logger.info("Local model loaded successfully")
+        return True
     except Exception:
-        logger.exception("模型加载失败")
+        logger.exception("Local model failed to load")
         return False
-
-    rag = None
-    if config.enable_rag:
-        try:
-            rag = AncientArchitectureRAG()
-            logger.info("RAG 检索器加载成功")
-        except Exception:
-            logger.exception("RAG 检索器加载失败，服务将以纯模型模式运行")
-
-    return True
 
 
 @app.route("/", methods=["GET"])
@@ -325,16 +449,21 @@ def index():
 
 @app.route("/api/ai/health", methods=["GET"])
 def health():
+    matcher_assets_ready = _matcher_render_root().exists()
+    service_ready = _remote_api_enabled() or model is not None
     return jsonify(
         {
-            "status": "up" if model is not None else "degraded",
+            "status": "up" if service_ready else "degraded",
             "service": "Chinese Ancient Architecture AI Assistant",
-            "model_loaded": model is not None,
+            "service_mode": _service_mode(),
+            "model_loaded": model is not None or _remote_api_enabled(),
+            "remote_api_enabled": _remote_api_enabled(),
+            "remote_model": config.siliconflow_model if _remote_api_enabled() else None,
             "rag_loaded": rag is not None,
             "model_path": config.model_path,
-            "device": str(resolve_input_device()),
+            "device": resolve_input_device(),
             "matcher_render_root": str(_matcher_render_root()),
-            "matcher_assets_ready": _matcher_render_root().exists(),
+            "matcher_assets_ready": matcher_assets_ready,
             "matcher_error": image_matcher_error,
         }
     )
@@ -369,8 +498,8 @@ def agent_match():
 
 @app.route("/api/ai/chat", methods=["POST"])
 def chat():
-    if model is None or tokenizer is None or processor is None:
-        return jsonify({"error": "模型尚未加载完成"}), 503
+    if not _remote_api_enabled() and (model is None or tokenizer is None or processor is None):
+        return jsonify({"error": "model is not ready"}), 503
 
     data = request.get_json(silent=True) or {}
     question = str(data.get("question", "")).strip()
@@ -378,41 +507,49 @@ def chat():
     has_image = bool(image_base64)
 
     if not question:
-        return jsonify({"error": "question 不能为空"}), 400
+        return jsonify({"error": "question cannot be empty"}), 400
 
-    logger.info("收到问题: %s", question)
-    logger.info("是否包含图片: %s", has_image)
+    logger.info("Received question: %s", question)
+    logger.info("Has image: %s", has_image)
 
     try:
         image = decode_image(image_base64) if has_image else None
     except (ValueError, UnidentifiedImageError, OSError):
-        logger.exception("图片解析失败")
-        return jsonify({"error": "image 不是合法的 base64 图片"}), 400
+        logger.exception("Image decode failed")
+        return jsonify({"error": "image is not a valid base64 image"}), 400
 
     try:
         context = rag.get_context(question) if rag else ""
-        messages = build_messages(question=question, context=context, image=image)
-        answer = generate_answer(messages=messages, image=image)
-        logger.info("回答生成成功，长度=%s", len(answer))
+        if _remote_api_enabled():
+            answer = generate_remote_answer(
+                question=question,
+                context=context,
+                image_base64=image_base64 if has_image else None,
+            )
+        else:
+            messages = build_messages(question=question, context=context, image=image)
+            answer = generate_answer(messages=messages, image=image)
+
+        logger.info("Answer generated successfully, length=%s", len(answer))
 
         response_body = {
             "question": question,
             "answer": answer,
             "used_knowledge": bool(context),
             "has_image": has_image,
+            "service_mode": _service_mode(),
         }
         return app.response_class(
             response=json.dumps(response_body, ensure_ascii=False),
             mimetype="application/json",
         )
     except Exception:
-        logger.exception("问答处理失败")
-        return jsonify({"error": "服务内部错误"}), 500
+        logger.exception("Chat request failed")
+        return jsonify({"error": "internal server error"}), 500
 
 
 if __name__ == "__main__":
     if load_model():
-        logger.info("服务启动成功，监听 %s:%s", config.host, config.port)
+        logger.info("Service started successfully on %s:%s", config.host, config.port)
         app.run(host=config.host, port=config.port, threaded=True)
-    else:
-        raise SystemExit("模型加载失败，服务未启动")
+    raise SystemExit("Service failed to start")
