@@ -16,6 +16,73 @@ const elements = {
   template: document.getElementById("message-template"),
 };
 
+if (typeof marked !== 'undefined') {
+  marked.setOptions({
+    breaks: true,
+    gfm: true
+  });
+}
+
+function preprocessMarkdown(text) {
+  if (!text) return text;
+  let processed = text;
+  // Separate run-on lists that AI might output on a single line
+  processed = processed.replace(/([：:。！？\?])\s*\*(?=[^\s\*])/g, '$1\n\n* ');
+  // Ensure bullets have a trailing space so marked.js recognizes them
+  processed = processed.replace(/(^|\n)\s*\*(?=[^\s\*])/g, '$1* ');
+  return processed;
+}
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeModelMarkdown(text) {
+  if (!text) return "";
+
+  let normalized = preprocessMarkdown(String(text).replace(/\r\n?/g, "\n"));
+  normalized = normalized.replace(/\*{3,}/g, "**");
+  normalized = normalized.replace(/(^|\n)(#{1,6})(?=\S)/g, "$1$2 ");
+  normalized = normalized.replace(/([。！？；：:])\s*(#{1,6})(?=\S)/g, "$1\n\n$2 ");
+  normalized = normalized.replace(/([。！？；：:])\s*(\d+\.)\s*(?=\S)/g, "$1\n\n$2 ");
+  normalized = normalized.replace(/([。！？；：:])\s*((?:[-*])\s*)(?=\S)/g, "$1\n\n$2");
+  normalized = normalized.replace(/([。！？；：:])\s*(\*\*[^*\n]+\*\*)/g, "$1\n\n$2");
+  normalized = normalized.replace(/(^|\n)\s*([*-])(?=\S)/g, "$1$2 ");
+  normalized = normalized.replace(/\n{3,}/g, "\n\n");
+  return normalized;
+}
+
+function markdownToPlainText(text) {
+  if (!text) return "";
+
+  return String(text)
+    .replace(/\r\n?/g, "\n")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/(\*|_)(.*?)\1/g, "$2")
+    .replace(/`{1,3}([^`]*)`{1,3}/g, "$1")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/^\s*\d+\.\s+/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function renderMarkdown(text) {
+  const normalized = normalizeModelMarkdown(text);
+
+  if (typeof marked === "undefined") {
+    return escapeHtml(markdownToPlainText(normalized)).replace(/\n/g, "<br>");
+  }
+
+  return marked.parse(normalized);
+}
+
 let selectedImageBase64 = "";
 let selectedImageName = "";
 
@@ -37,7 +104,7 @@ let lipSyncInterval = null;
 let simpleMouthInterval = null;
 let currentShapeIndex = 0;
 let mouthShapesData = [];
-let autoPlay = true;
+let autoPlay = false;
 
 const digitalHuman = document.getElementById("digital-human");
 const speakingBubble = document.getElementById("speaking-bubble");
@@ -62,7 +129,7 @@ function attachPlayButton(body, text) {
   playBtn.style.background = "#f0f0f0";
   playBtn.style.cursor = "pointer";
   playBtn.style.fontSize = "12px";
-  playBtn.onclick = () => speakText(text);
+  playBtn.onclick = () => speakText(markdownToPlainText(text));
   body.appendChild(playBtn);
 }
 
@@ -72,12 +139,12 @@ function finalizeAssistantMessage(messageNode, text, options = {}) {
   }
 
   const body = messageNode.querySelector(".message-body");
-  body.textContent = text;
+  body.innerHTML = renderMarkdown(text);
   attachPlayButton(body, text);
   messageNode.classList.remove("loading");
 
   if (options.autoPlay && text) {
-    speakText(text);
+    speakText(markdownToPlainText(text));
   }
 
   scrollMessagesToBottom();
@@ -93,7 +160,7 @@ function createMessage(role, content, options = {}) {
   const badge = node.querySelector(".message-badge");
   const body = node.querySelector(".message-body");
   badge.textContent = role === "assistant" ? "AI" : "我";
-  body.textContent = content;
+  body.innerHTML = renderMarkdown(content);
 
   if (options.imageUrl) {
     const image = document.createElement("img");
@@ -231,7 +298,7 @@ async function sendStreamingChat({ question, imageBase64, loadingMessage }) {
 
       if (event.type === "delta") {
         answer += event.delta || "";
-        body.textContent = answer || "正在分析，请稍候...";
+        body.innerHTML = renderMarkdown(answer || "正在分析，请稍候...");
         loadingMessage.classList.remove("loading");
         scrollMessagesToBottom();
         continue;

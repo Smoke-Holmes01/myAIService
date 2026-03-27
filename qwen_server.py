@@ -95,7 +95,8 @@ class ServerConfig:
     default_system_prompt: str = os.getenv(
         "SYSTEM_PROMPT",
         "你是一位专业的中国古建筑 AI 助手。请优先结合可用资料作答，表达清晰，"
-        "如果信息不足请明确说明不确定。",
+        "如果信息不足请明确说明不确定。默认使用自然中文段落回答，除非用户明确要求，"
+        "否则不要输出 Markdown 标题、列表符号、加粗符号或代码块。",
     )
     enable_rag: bool = _get_env_bool("ENABLE_RAG", True)
 
