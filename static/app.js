@@ -85,6 +85,9 @@ function renderMarkdown(text) {
 
 let selectedImageBase64 = "";
 let selectedImageName = "";
+let activeImageBase64 = "";
+let activeImageName = "";
+let lastToolMode = "";
 
 const mouthImages = {
   A: "/static/mouth_shapes/mouth_A.png",
@@ -202,25 +205,107 @@ function clearImageSelection() {
   elements.previewName.textContent = "未选择文件";
 }
 
-function shouldUseMatcher(question, hasImage) {
+function clearConversationImageContext() {
+  activeImageBase64 = "";
+  activeImageName = "";
+  lastToolMode = "";
+}
+
+function getEffectiveImageState() {
+  if (selectedImageBase64) {
+    return {
+      imageBase64: selectedImageBase64,
+      imageName: selectedImageName,
+      usingConversationImage: false,
+    };
+  }
+
+  if (activeImageBase64) {
+    return {
+      imageBase64: activeImageBase64,
+      imageName: activeImageName,
+      usingConversationImage: true,
+    };
+  }
+
+  return {
+    imageBase64: "",
+    imageName: "",
+    usingConversationImage: false,
+  };
+}
+
+function shouldUseMatcher(question, options = {}) {
+  const {
+    hasImage = false,
+    usingConversationImage = false,
+    lastToolMode: previousToolMode = "",
+  } = options;
+
   if (!hasImage) {
     return false;
   }
 
-  const matcherKeywords = [
+  const explicitMatcherKeywords = [
     "match",
     "matcher",
     "3d",
     "obj",
     "mesh",
     "model",
+    "which model",
+    "similar model",
     "匹配",
     "模型",
     "三维",
     "对应",
   ];
+  const imageAnalysisKeywords = [
+    "what is this",
+    "what is it",
+    "identify",
+    "recognize",
+    "analyse",
+    "analyze",
+    "which one",
+    "这是什么",
+    "这是啥",
+    "这啥",
+    "识别",
+    "分析",
+    "判断",
+    "看一下",
+    "看看",
+    "属于什么",
+  ];
+  const matcherFollowupKeywords = [
+    "哪个",
+    "哪一个",
+    "结果",
+    "候选",
+    "编号",
+    "视角",
+    "最接近",
+    "为什么",
+    "对应",
+    "model",
+    "match",
+  ];
   const normalizedQuestion = String(question || "").toLowerCase();
-  return matcherKeywords.some((keyword) => normalizedQuestion.includes(keyword));
+
+  if (explicitMatcherKeywords.some((keyword) => normalizedQuestion.includes(keyword))) {
+    return true;
+  }
+
+  if (!usingConversationImage && imageAnalysisKeywords.some((keyword) => normalizedQuestion.includes(keyword))) {
+    return true;
+  }
+
+  if (usingConversationImage && previousToolMode === "matcher") {
+    return matcherFollowupKeywords.some((keyword) => normalizedQuestion.includes(keyword));
+  }
+
+  return false;
 }
 
 async function updateHealthStatus() {
@@ -344,6 +429,8 @@ elements.removeImage.addEventListener("click", () => {
 
 elements.clearChat.addEventListener("click", () => {
   elements.messages.innerHTML = "";
+  clearConversationImageContext();
+  clearImageSelection();
   createMessage(
     "assistant",
     "对话已清空。你可以继续提问，也可以重新上传一张古建筑图片。",
@@ -358,9 +445,13 @@ elements.form.addEventListener("submit", async (event) => {
     return;
   }
 
+  const effectiveImageState = getEffectiveImageState();
+  const hasImage = Boolean(effectiveImageState.imageBase64);
   const userText = selectedImageName
     ? `${question}\n\n[已上传图片：${selectedImageName}]`
-    : question;
+    : effectiveImageState.usingConversationImage
+      ? `${question}\n\n[沿用上一张图片：${effectiveImageState.imageName || "未命名图片"}]`
+      : question;
 
   createMessage("user", userText, {
     imageUrl: selectedImageBase64 || null,
@@ -374,7 +465,16 @@ elements.form.addEventListener("submit", async (event) => {
   setPendingState(true);
 
   try {
-    const useMatcher = shouldUseMatcher(question, Boolean(selectedImageBase64));
+    if (selectedImageBase64) {
+      activeImageBase64 = selectedImageBase64;
+      activeImageName = selectedImageName;
+    }
+
+    const useMatcher = shouldUseMatcher(question, {
+      hasImage,
+      usingConversationImage: effectiveImageState.usingConversationImage,
+      lastToolMode,
+    });
 
     if (useMatcher) {
       const response = await fetch("/api/agent/match", {
@@ -384,7 +484,7 @@ elements.form.addEventListener("submit", async (event) => {
         },
         body: JSON.stringify({
           question,
-          image: selectedImageBase64 || undefined,
+          image: effectiveImageState.imageBase64 || undefined,
         }),
       });
 
@@ -398,12 +498,14 @@ elements.form.addEventListener("submit", async (event) => {
         `${data.answer}\n\n[本次结果由本地 3D 模型匹配工具生成]`,
         { autoPlay },
       );
+      lastToolMode = "matcher";
     } else {
       await sendStreamingChat({
         question,
-        imageBase64: selectedImageBase64,
+        imageBase64: effectiveImageState.imageBase64,
         loadingMessage,
       });
+      lastToolMode = "chat";
     }
   } catch (error) {
     finalizeAssistantMessage(loadingMessage, `调用失败：${error.message}`, { autoPlay: false });
