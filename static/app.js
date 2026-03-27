@@ -98,16 +98,95 @@ async function updateHealthStatus() {
     const data = await response.json();
     const isOnline = response.ok && data.status === "up";
     const status = isOnline ? "服务在线，可开始演示" : "服务未就绪";
+    const modeMeta = data.remote_api_enabled
+      ? `模式: Remote API | 模型: ${data.remote_model || "未知"}`
+      : `模式: Local Model | 路径: ${data.model_path || "未知"}`;
 
     elements.statusDot.classList.remove("offline", "online");
     elements.statusDot.classList.add(isOnline ? "online" : "offline");
     elements.statusText.textContent = status;
-    elements.statusMeta.textContent = `设备：${data.device || "未知"} ｜ RAG：${data.rag_loaded ? "已启用" : "未启用"} ｜ 模型路径：${data.model_path || "未知"}`;
+    elements.statusMeta.textContent = `设备: ${data.device || "未知"} | RAG: ${data.rag_loaded ? "已启用" : "未启用"} | ${modeMeta}`;
   } catch (error) {
     elements.statusDot.classList.remove("online");
     elements.statusDot.classList.add("offline");
     elements.statusText.textContent = "无法连接 AI 服务";
     elements.statusMeta.textContent = "请确认 qwen_server.py 已启动，并检查服务端口是否可访问。";
+  }
+}
+
+async function sendStreamingChat({ question, imageBase64, loadingMessage }) {
+  const response = await fetch("/api/ai/chat/stream", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      question,
+      image: imageBase64 || undefined,
+    }),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || "请求失败");
+  }
+
+  if (!response.body) {
+    throw new Error("流式响应不可用");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  const body = loadingMessage.querySelector(".message-body");
+
+  let buffer = "";
+  let answer = "";
+  let usedKnowledge = false;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const event = JSON.parse(trimmed);
+      if (event.type === "start") {
+        usedKnowledge = Boolean(event.used_knowledge);
+        continue;
+      }
+
+      if (event.type === "delta") {
+        answer += event.delta || "";
+        body.textContent = answer || "正在分析，请稍候...";
+        loadingMessage.classList.remove("loading");
+        scrollMessagesToBottom();
+        continue;
+      }
+
+      if (event.type === "done") {
+        answer = event.answer || answer;
+        body.textContent = usedKnowledge
+          ? `${answer}\n\n[本次回答已结合知识库检索结果]`
+          : `${answer}\n\n[本次回答由远程模型流式生成]`;
+        loadingMessage.classList.remove("loading");
+        scrollMessagesToBottom();
+        continue;
+      }
+
+      if (event.type === "error") {
+        throw new Error(event.error || "流式请求失败");
+      }
+    }
   }
 }
 
@@ -137,7 +216,7 @@ elements.clearChat.addEventListener("click", () => {
   elements.messages.innerHTML = "";
   createMessage(
     "assistant",
-    "对话已清空。你可以继续提问，也可以重新上传一张古建筑图片。"
+    "对话已清空。你可以继续提问，也可以重新上传一张古建筑图片。",
   );
 });
 
@@ -165,35 +244,34 @@ elements.form.addEventListener("submit", async (event) => {
 
   try {
     const useMatcher = shouldUseMatcher(question, Boolean(selectedImageBase64));
-    const endpoint = useMatcher ? "/api/agent/match" : "/api/ai/chat";
 
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    if (useMatcher) {
+      const response = await fetch("/api/agent/match", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          question,
+          image: selectedImageBase64 || undefined,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "请求失败");
+      }
+
+      loadingMessage.querySelector(".message-body").textContent =
+        `${data.answer}\n\n[This result came from the compterdesign matcher.]`;
+      loadingMessage.classList.remove("loading");
+    } else {
+      await sendStreamingChat({
         question,
-        image: selectedImageBase64 || undefined,
-        use_matcher: useMatcher,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || "请求失败");
+        imageBase64: selectedImageBase64,
+        loadingMessage,
+      });
     }
-
-    let answer = data.used_knowledge
-      ? `${data.answer}\n\n[本次回答已结合知识库检索结果]`
-      : `${data.answer}\n\n[本次回答基于模型直接生成]`;
-
-    if (data.used_matcher) {
-      answer = `${data.answer}\n\n[This result came from the compterdesign matcher.]`;
-    }
-
-    loadingMessage.querySelector(".message-body").textContent = answer;
-    loadingMessage.classList.remove("loading");
   } catch (error) {
     loadingMessage.querySelector(".message-body").textContent = `调用失败：${error.message}`;
     loadingMessage.classList.remove("loading");

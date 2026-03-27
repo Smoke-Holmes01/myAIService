@@ -8,10 +8,16 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from typing import Iterator
 from typing import Optional
 
 import torch
-from flask import Flask, jsonify, render_template, request
+from flask import Flask
+from flask import Response
+from flask import jsonify
+from flask import render_template
+from flask import request
+from flask import stream_with_context
 from flask_cors import CORS
 from openai import OpenAI
 from PIL import Image
@@ -146,6 +152,12 @@ def decode_image(image_base64: str) -> Image.Image:
     return Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
 
+def _validate_image_payload(image_base64: Optional[str]) -> None:
+    if not image_base64:
+        return
+    decode_image(image_base64)
+
+
 def _parse_top_k(value: Any, default: int = 3) -> int:
     if value in {None, ""}:
         return default
@@ -239,6 +251,35 @@ def generate_remote_answer(question: str, context: str, image_base64: Optional[s
     if not answer:
         raise RuntimeError("Remote API returned an empty answer.")
     return answer
+
+
+def iter_remote_answer_stream(question: str, context: str, image_base64: Optional[str]) -> Iterator[str]:
+    client = get_remote_client()
+    stream = client.chat.completions.create(
+        model=config.siliconflow_model,
+        messages=_build_remote_messages(question=question, context=context, image_base64=image_base64),
+        max_tokens=config.max_new_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        stream=True,
+    )
+
+    for chunk in stream:
+        if not getattr(chunk, "choices", None):
+            continue
+
+        choice = chunk.choices[0]
+        delta = getattr(choice, "delta", None)
+        if delta is None:
+            continue
+
+        text = _extract_remote_answer_content(getattr(delta, "content", None))
+        if text:
+            yield text
+
+
+def _jsonl(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
 def get_image_matcher():
@@ -546,6 +587,61 @@ def chat():
     except Exception:
         logger.exception("Chat request failed")
         return jsonify({"error": "internal server error"}), 500
+
+
+@app.route("/api/ai/chat/stream", methods=["POST"])
+def chat_stream():
+    if not _remote_api_enabled():
+        return jsonify({"error": "streaming is only available in remote API mode"}), 400
+
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question", "")).strip()
+    image_base64 = data.get("image")
+    has_image = bool(image_base64)
+
+    if not question:
+        return jsonify({"error": "question cannot be empty"}), 400
+
+    try:
+        _validate_image_payload(image_base64 if has_image else None)
+    except (ValueError, UnidentifiedImageError, OSError):
+        logger.exception("Image decode failed for streaming chat")
+        return jsonify({"error": "image is not a valid base64 image"}), 400
+
+    @stream_with_context
+    def generate() -> Iterator[str]:
+        try:
+            context = rag.get_context(question) if rag else ""
+            yield _jsonl(
+                {
+                    "type": "start",
+                    "used_knowledge": bool(context),
+                    "service_mode": _service_mode(),
+                }
+            )
+
+            chunks: list[str] = []
+            for delta in iter_remote_answer_stream(
+                question=question,
+                context=context,
+                image_base64=image_base64 if has_image else None,
+            ):
+                chunks.append(delta)
+                yield _jsonl({"type": "delta", "delta": delta})
+
+            yield _jsonl(
+                {
+                    "type": "done",
+                    "answer": "".join(chunks),
+                    "used_knowledge": bool(context),
+                    "service_mode": _service_mode(),
+                }
+            )
+        except Exception:
+            logger.exception("Streaming chat request failed")
+            yield _jsonl({"type": "error", "error": "internal server error"})
+
+    return Response(generate(), mimetype="application/x-ndjson")
 
 
 if __name__ == "__main__":
