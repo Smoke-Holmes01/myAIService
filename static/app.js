@@ -19,8 +19,68 @@ const elements = {
 let selectedImageBase64 = "";
 let selectedImageName = "";
 
+const mouthImages = {
+  A: "/static/mouth_shapes/mouth_A.png",
+  B: "/static/mouth_shapes/mouth_B.png",
+  C: "/static/mouth_shapes/mouth_C.png",
+  D: "/static/mouth_shapes/mouth_D.png",
+  E: "/static/mouth_shapes/mouth_E.png",
+  G: "/static/mouth_shapes/mouth_G.png",
+  H: "/static/mouth_shapes/mouth_H.png",
+};
+
+const defaultMouthShape = "A";
+
+let currentAudio = null;
+let isSpeaking = false;
+let lipSyncInterval = null;
+let simpleMouthInterval = null;
+let currentShapeIndex = 0;
+let mouthShapesData = [];
+let autoPlay = true;
+
+const digitalHuman = document.getElementById("digital-human");
+const speakingBubble = document.getElementById("speaking-bubble");
+const bubbleContent = document.querySelector(".bubble-content");
+
 function scrollMessagesToBottom() {
   elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
+function attachPlayButton(body, text) {
+  if (!body || !text || body.querySelector(".play-btn")) {
+    return;
+  }
+
+  const playBtn = document.createElement("button");
+  playBtn.className = "play-btn";
+  playBtn.textContent = "播放";
+  playBtn.style.marginLeft = "12px";
+  playBtn.style.padding = "4px 12px";
+  playBtn.style.borderRadius = "20px";
+  playBtn.style.border = "none";
+  playBtn.style.background = "#f0f0f0";
+  playBtn.style.cursor = "pointer";
+  playBtn.style.fontSize = "12px";
+  playBtn.onclick = () => speakText(text);
+  body.appendChild(playBtn);
+}
+
+function finalizeAssistantMessage(messageNode, text, options = {}) {
+  if (!messageNode) {
+    return;
+  }
+
+  const body = messageNode.querySelector(".message-body");
+  body.textContent = text;
+  attachPlayButton(body, text);
+  messageNode.classList.remove("loading");
+
+  if (options.autoPlay && text) {
+    speakText(text);
+  }
+
+  scrollMessagesToBottom();
 }
 
 function createMessage(role, content, options = {}) {
@@ -46,6 +106,10 @@ function createMessage(role, content, options = {}) {
     image.style.marginBottom = "14px";
     image.style.border = "1px solid rgba(54, 36, 23, 0.12)";
     body.prepend(image);
+  }
+
+  if (role === "assistant" && content && !options.loading && options.enablePlayback !== false) {
+    attachPlayButton(body, content);
   }
 
   elements.messages.appendChild(node);
@@ -175,11 +239,10 @@ async function sendStreamingChat({ question, imageBase64, loadingMessage }) {
 
       if (event.type === "done") {
         answer = event.answer || answer;
-        body.textContent = usedKnowledge
+        const finalText = usedKnowledge
           ? `${answer}\n\n[本次回答已结合知识库检索结果]`
           : `${answer}\n\n[本次回答由远程模型流式生成]`;
-        loadingMessage.classList.remove("loading");
-        scrollMessagesToBottom();
+        finalizeAssistantMessage(loadingMessage, finalText, { autoPlay });
         continue;
       }
 
@@ -238,6 +301,7 @@ elements.form.addEventListener("submit", async (event) => {
 
   const loadingMessage = createMessage("assistant", "正在分析，请稍候...", {
     loading: true,
+    enablePlayback: false,
   });
 
   setPendingState(true);
@@ -262,9 +326,11 @@ elements.form.addEventListener("submit", async (event) => {
         throw new Error(data.error || "请求失败");
       }
 
-      loadingMessage.querySelector(".message-body").textContent =
-        `${data.answer}\n\n[This result came from the compterdesign matcher.]`;
-      loadingMessage.classList.remove("loading");
+      finalizeAssistantMessage(
+        loadingMessage,
+        `${data.answer}\n\n[This result came from the compterdesign matcher.]`,
+        { autoPlay },
+      );
     } else {
       await sendStreamingChat({
         question,
@@ -273,8 +339,7 @@ elements.form.addEventListener("submit", async (event) => {
       });
     }
   } catch (error) {
-    loadingMessage.querySelector(".message-body").textContent = `调用失败：${error.message}`;
-    loadingMessage.classList.remove("loading");
+    finalizeAssistantMessage(loadingMessage, `调用失败：${error.message}`, { autoPlay: false });
   } finally {
     setPendingState(false);
     elements.question.value = "";
@@ -282,6 +347,280 @@ elements.form.addEventListener("submit", async (event) => {
     scrollMessagesToBottom();
   }
 });
+
+function initMouthImage() {
+  let mouthImg = document.getElementById("mouth-img");
+  if (!mouthImg) {
+    mouthImg = document.createElement("img");
+    mouthImg.id = "mouth-img";
+    mouthImg.style.position = "absolute";
+    mouthImg.style.bottom = "20px";
+    mouthImg.style.left = "50%";
+    mouthImg.style.transform = "translateX(-50%)";
+    mouthImg.style.width = "50px";
+    mouthImg.style.height = "auto";
+    mouthImg.style.transition = "all 0.05s linear";
+    mouthImg.style.zIndex = "10";
+    mouthImg.style.pointerEvents = "none";
+
+    const avatarWrapper = document.querySelector(".avatar-wrapper");
+    if (avatarWrapper) {
+      avatarWrapper.style.position = "relative";
+      avatarWrapper.appendChild(mouthImg);
+    }
+  }
+  return mouthImg;
+}
+
+function updateMouthShape(shapeCode) {
+  const mouthImg = document.getElementById("mouth-img");
+  if (!mouthImg) {
+    return;
+  }
+
+  const imagePath = mouthImages[shapeCode] || mouthImages[defaultMouthShape];
+  mouthImg.src = imagePath;
+}
+
+function startLipSyncAnimation(mouthShapes) {
+  stopLipSyncAnimation();
+
+  mouthShapesData = mouthShapes;
+  currentShapeIndex = 0;
+
+  if (!mouthShapesData || mouthShapesData.length === 0) {
+    startSimpleMouthAnimation();
+    return;
+  }
+
+  initMouthImage();
+
+  lipSyncInterval = setInterval(() => {
+    if (!currentAudio || currentAudio.paused || currentAudio.ended) {
+      return;
+    }
+
+    const currentTime = currentAudio.currentTime;
+
+    while (
+      currentShapeIndex < mouthShapesData.length &&
+      currentTime >= mouthShapesData[currentShapeIndex].end
+    ) {
+      currentShapeIndex += 1;
+    }
+
+    if (
+      currentShapeIndex < mouthShapesData.length &&
+      currentTime >= mouthShapesData[currentShapeIndex].start
+    ) {
+      updateMouthShape(mouthShapesData[currentShapeIndex].shape);
+    }
+  }, 50);
+}
+
+function startSimpleMouthAnimation() {
+  stopLipSyncAnimation();
+
+  initMouthImage();
+  let frameIndex = 0;
+  const shapes = ["A", "B", "C", "D", "C", "B"];
+
+  simpleMouthInterval = setInterval(() => {
+    if (!currentAudio || currentAudio.paused || currentAudio.ended) {
+      return;
+    }
+    frameIndex = (frameIndex + 1) % shapes.length;
+    updateMouthShape(shapes[frameIndex]);
+  }, 150);
+}
+
+function stopLipSyncAnimation() {
+  if (lipSyncInterval) {
+    clearInterval(lipSyncInterval);
+    lipSyncInterval = null;
+  }
+  if (simpleMouthInterval) {
+    clearInterval(simpleMouthInterval);
+    simpleMouthInterval = null;
+  }
+}
+
+function resetMouthShape() {
+  const mouthImg = document.getElementById("mouth-img");
+  if (mouthImg) {
+    updateMouthShape("A");
+  }
+}
+
+function updateSpeakingBubble(text) {
+  if (bubbleContent) {
+    bubbleContent.textContent = text.substring(0, 100) + (text.length > 100 ? "..." : "");
+  }
+  if (speakingBubble) {
+    speakingBubble.style.opacity = "1";
+  }
+}
+
+function clearSpeakingBubble() {
+  setTimeout(() => {
+    if (digitalHuman && !digitalHuman.classList.contains("speaking")) {
+      if (speakingBubble) {
+        speakingBubble.style.opacity = "0";
+      }
+      if (bubbleContent) {
+        setTimeout(() => {
+          bubbleContent.textContent = "";
+        }, 300);
+      }
+    }
+  }, 500);
+}
+
+function activateDigitalHuman(isActive) {
+  if (!digitalHuman) {
+    return;
+  }
+
+  if (isActive) {
+    digitalHuman.classList.add("speaking");
+  } else {
+    digitalHuman.classList.remove("speaking");
+    clearSpeakingBubble();
+  }
+}
+
+function stopCurrentPlayback() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.currentTime = 0;
+    currentAudio = null;
+  }
+
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+  }
+
+  activateDigitalHuman(false);
+  stopLipSyncAnimation();
+  resetMouthShape();
+  isSpeaking = false;
+}
+
+async function speakText(text) {
+  if (!text || text.trim() === "") {
+    return;
+  }
+
+  stopCurrentPlayback();
+
+  try {
+    activateDigitalHuman(true);
+    updateSpeakingBubble(text);
+
+    let mouthShapes = [];
+    try {
+      const lipResponse = await fetch("/api/ai/lipsync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+
+      if (lipResponse.ok) {
+        const lipData = await lipResponse.json();
+        mouthShapes = lipData.mouth_shapes || [];
+      }
+    } catch (error) {
+      console.warn("Lip sync generation failed, falling back to simple mouth animation.", error);
+    }
+
+    const audioResponse = await fetch("/api/ai/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+
+    if (!audioResponse.ok) {
+      throw new Error("TTS request failed");
+    }
+
+    const audioBlob = await audioResponse.blob();
+    const audioUrl = URL.createObjectURL(audioBlob);
+    currentAudio = new Audio(audioUrl);
+
+    if (mouthShapes.length > 0) {
+      startLipSyncAnimation(mouthShapes);
+    } else {
+      startSimpleMouthAnimation();
+    }
+
+    currentAudio.onended = () => {
+      activateDigitalHuman(false);
+      stopLipSyncAnimation();
+      resetMouthShape();
+      URL.revokeObjectURL(audioUrl);
+      currentAudio = null;
+      isSpeaking = false;
+    };
+
+    currentAudio.onerror = () => {
+      activateDigitalHuman(false);
+      stopLipSyncAnimation();
+      resetMouthShape();
+      URL.revokeObjectURL(audioUrl);
+      currentAudio = null;
+      isSpeaking = false;
+    };
+
+    await currentAudio.play();
+    isSpeaking = true;
+  } catch (error) {
+    console.error("Voice playback failed:", error);
+    activateDigitalHuman(false);
+    stopLipSyncAnimation();
+    resetMouthShape();
+
+    if ("speechSynthesis" in window) {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "zh-CN";
+      utterance.onend = () => {
+        activateDigitalHuman(false);
+        stopLipSyncAnimation();
+        resetMouthShape();
+      };
+      window.speechSynthesis.speak(utterance);
+      startSimpleMouthAnimation();
+    }
+  }
+}
+
+function toggleAutoPlay() {
+  autoPlay = !autoPlay;
+  const voiceToggle = document.getElementById("voice-toggle");
+  if (!voiceToggle) {
+    return;
+  }
+
+  if (autoPlay) {
+    voiceToggle.classList.add("auto-play");
+    voiceToggle.textContent = "自动播放 (开)";
+  } else {
+    voiceToggle.classList.remove("auto-play");
+    voiceToggle.textContent = "自动播放 (关)";
+  }
+}
+
+if (digitalHuman) {
+  digitalHuman.addEventListener("click", stopCurrentPlayback);
+}
+
+const voiceToggle = document.getElementById("voice-toggle");
+if (voiceToggle) {
+  voiceToggle.addEventListener("click", toggleAutoPlay);
+  if (autoPlay) {
+    voiceToggle.classList.add("auto-play");
+    voiceToggle.textContent = "自动播放 (开)";
+  }
+}
 
 updateHealthStatus();
 window.setInterval(updateHealthStatus, 30000);
