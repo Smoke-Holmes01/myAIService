@@ -238,8 +238,6 @@ function getEffectiveImageState() {
 function shouldUseMatcher(question, options = {}) {
   const {
     hasImage = false,
-    usingConversationImage = false,
-    lastToolMode: previousToolMode = "",
   } = options;
 
   if (!hasImage) {
@@ -260,52 +258,8 @@ function shouldUseMatcher(question, options = {}) {
     "三维",
     "对应",
   ];
-  const imageAnalysisKeywords = [
-    "what is this",
-    "what is it",
-    "identify",
-    "recognize",
-    "analyse",
-    "analyze",
-    "which one",
-    "这是什么",
-    "这是啥",
-    "这啥",
-    "识别",
-    "分析",
-    "判断",
-    "看一下",
-    "看看",
-    "属于什么",
-  ];
-  const matcherFollowupKeywords = [
-    "哪个",
-    "哪一个",
-    "结果",
-    "候选",
-    "编号",
-    "视角",
-    "最接近",
-    "为什么",
-    "对应",
-    "model",
-    "match",
-  ];
   const normalizedQuestion = String(question || "").toLowerCase();
-
-  if (explicitMatcherKeywords.some((keyword) => normalizedQuestion.includes(keyword))) {
-    return true;
-  }
-
-  if (!usingConversationImage && imageAnalysisKeywords.some((keyword) => normalizedQuestion.includes(keyword))) {
-    return true;
-  }
-
-  if (usingConversationImage && previousToolMode === "matcher") {
-    return matcherFollowupKeywords.some((keyword) => normalizedQuestion.includes(keyword));
-  }
-
-  return false;
+  return explicitMatcherKeywords.some((keyword) => normalizedQuestion.includes(keyword));
 }
 
 async function updateHealthStatus() {
