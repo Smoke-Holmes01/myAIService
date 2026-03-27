@@ -215,6 +215,9 @@ def _build_remote_messages(question: str, context: str, image_base64: Optional[s
 
 
 def _extract_remote_answer_content(content: Any) -> str:
+    if content is None:
+        return ""
+
     if isinstance(content, str):
         return content.strip()
 
@@ -222,12 +225,16 @@ def _extract_remote_answer_content(content: Any) -> str:
         parts: list[str] = []
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(str(item.get("text", "")).strip())
+                text_value = item.get("text")
+                if text_value is not None:
+                    parts.append(str(text_value).strip())
                 continue
 
             item_type = getattr(item, "type", None)
             if item_type == "text":
-                parts.append(str(getattr(item, "text", "")).strip())
+                text_value = getattr(item, "text", None)
+                if text_value is not None:
+                    parts.append(str(text_value).strip())
 
         return "\n".join(part for part in parts if part).strip()
 
