@@ -325,24 +325,57 @@ def get_image_matcher():
         raise RuntimeError(image_matcher_error) from exc
 
 
-def _format_match_answer(match_result: dict[str, Any]) -> str:
+def _describe_match_confidence(matches: list[dict[str, Any]]) -> str:
+    if len(matches) < 2:
+        return "当前只得到了一条有效候选结果，可以先把它当作主要参考。"
+
+    first_score = float(matches[0].get("score", 0.0))
+    second_score = float(matches[1].get("score", 0.0))
+    gap = first_score - second_score
+
+    if gap >= 0.15:
+        return "第一候选与后续候选有一定差距，当前结果相对更明确一些。"
+    if gap >= 0.05:
+        return "第一候选略优于其他候选，但仍建议结合实际构件形态再做确认。"
+    return "前几项候选结果比较接近，说明它们在轮廓上都有相似之处，建议把它们一起作为备选参考。"
+
+
+def _format_model_name(model_name: Any) -> str:
+    value = str(model_name).strip()
+    if not value:
+        return "未命名模型"
+    if value.endswith("号模型"):
+        return value
+    if value.lower().startswith("model "):
+        suffix = value.split(" ", 1)[1].strip()
+        return f"{suffix}号模型"
+    if value.lower().startswith("model"):
+        suffix = value[5:].strip()
+        return f"{suffix}号模型" if suffix else "模型"
+    return value
+
+
+def _format_match_answer(question: str, match_result: dict[str, Any]) -> str:
     matches = match_result.get("matches", [])
     if not matches:
-        return "No matching model was found."
+        return "我已经调用本地模型库做了匹配，但这次没有找到足够接近的候选结果。你可以换一张更清晰、主体更完整的图片后再试一次。"
 
     best_match = matches[0]
+    best_name = _format_model_name(best_match.get("model_name"))
+    candidate_names = [_format_model_name(item.get("model_name")) for item in matches[1:3]]
+    confidence_text = _describe_match_confidence(matches)
+
     lines = [
-        "I matched the uploaded image against the pre-rendered 3D model library.",
-        f"Best match: model {best_match['model_name']} (score {best_match['score']:.4f}).",
-        "Top candidates:",
+        "我已经调用本地 3D 模型库完成了这次匹配。",
+        f"从当前结果看，这张图片最接近库中的{best_name}。",
+        confidence_text,
     ]
 
-    for index, item in enumerate(matches, start=1):
-        view = item.get("best_view", {})
-        lines.append(
-            f"{index}. model {item['model_name']} | score {item['score']:.4f} | "
-            f"azimuth {view.get('azimuth')} | elevation {view.get('elevation')}"
-        )
+    if candidate_names:
+        lines.append(f"另外，{ '、'.join(candidate_names) }也比较接近，可以作为备选结果一起参考。")
+
+    if question:
+        lines.append("如果你愿意，我还可以继续把候选模型的编号、对应视角，或者更技术性的匹配信息展开给你。")
 
     return "\n".join(lines)
 
@@ -370,7 +403,7 @@ def _run_match_pipeline(question: str, image_base64: str, top_k: int) -> dict[st
 
     return {
         "question": question,
-        "answer": _format_match_answer(match_result),
+        "answer": _format_match_answer(question, match_result),
         "used_knowledge": False,
         "has_image": True,
         "used_matcher": True,

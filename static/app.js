@@ -395,7 +395,7 @@ elements.form.addEventListener("submit", async (event) => {
 
       finalizeAssistantMessage(
         loadingMessage,
-        `${data.answer}\n\n[This result came from the compterdesign matcher.]`,
+        `${data.answer}\n\n[本次结果由本地 3D 模型匹配工具生成]`,
         { autoPlay },
       );
     } else {
