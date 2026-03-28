@@ -214,12 +214,34 @@ def _decode_generated_ids(generated_ids) -> str:
     return ""
 
 
+def _local_system_prompt() -> str:
+    prompt = config.default_system_prompt
+    if local_model_family == "qwen3_5":
+        prompt += (
+            "\n\n请直接输出最终中文答案，不要输出 Thinking Process、Analyze the Request、"
+            "Draft the Response、Review against Constraints、Initial thought、Correction "
+            "等分析过程，也不要复述提示词。"
+        )
+    return prompt
+
+
 def _strip_reasoning_markers(text: str) -> str:
     cleaned = text.strip()
     if not cleaned:
         return ""
 
     cleaned = re.sub(r"(?is)<think>.*?</think>", "", cleaned).strip()
+    reasoning_markers = [
+        "thinking process",
+        "analyze the request",
+        "determine the response content",
+        "retrieve knowledge",
+        "draft the response",
+        "review against constraints",
+        "refine the content",
+        "initial thought",
+        "correction",
+    ]
 
     marker_patterns = [
         r"(?is)\bfinal output generation\b",
@@ -236,6 +258,8 @@ def _strip_reasoning_markers(text: str) -> str:
         matches = list(re.finditer(pattern, cleaned))
         if matches:
             match_end = max(match_end, matches[-1].end())
+
+    has_reasoning_markers = any(marker in cleaned.lower() for marker in reasoning_markers)
 
     if match_end != -1:
         trailing = cleaned[match_end:]
@@ -263,6 +287,50 @@ def _strip_reasoning_markers(text: str) -> str:
     cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
     cleaned = re.sub(r"(?m)^\s*\[本次回答由本地模型生成\]\s*$", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+
+    if has_reasoning_markers and match_end == -1:
+        filtered_lines: list[str] = []
+        skip_keywords = [
+            "thinking process",
+            "analyze the request",
+            "determine the response content",
+            "retrieve knowledge",
+            "draft the response",
+            "review against constraints",
+            "refine the content",
+            "initial thought",
+            "correction",
+            "topic:",
+            "role:",
+            "constraints:",
+            "prioritize available knowledge",
+            "express clearly",
+            "default to natural chinese paragraphs",
+            "do not output markdown",
+            "functions:",
+            "structural:",
+            "aesthetic",
+            "construction advantages",
+            "historical context",
+            "cultural significance",
+        ]
+        for line in cleaned.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            lowered = stripped.lower()
+            if any(keyword in lowered for keyword in skip_keywords):
+                continue
+            if re.fullmatch(r"[\d\.\:\-\(\)\[\]\"'`，,。\s]+", stripped):
+                continue
+            if re.search(r"[\u4e00-\u9fff]", stripped):
+                filtered_lines.append(stripped)
+
+        if filtered_lines:
+            cleaned = "\n".join(filtered_lines)
+        else:
+            return "抱歉，本地模型这一轮输出了中间推理过程，未稳定生成最终中文答案。请重试一次，或切换到 API 模式。"
+
     return cleaned.strip()
 
 
@@ -549,12 +617,12 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
 
     if image is None:
         return [
-            {"role": "system", "content": config.default_system_prompt},
+            {"role": "system", "content": _local_system_prompt()},
             {"role": "user", "content": user_text},
         ]
 
     return [
-        {"role": "system", "content": config.default_system_prompt},
+        {"role": "system", "content": _local_system_prompt()},
         {
             "role": "user",
             "content": [
