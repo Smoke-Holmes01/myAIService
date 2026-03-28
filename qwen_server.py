@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -211,6 +212,69 @@ def _decode_generated_ids(generated_ids) -> str:
             return decoded[0].strip()
 
     return ""
+
+
+def _strip_reasoning_markers(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", cleaned).strip()
+
+    marker_patterns = [
+        r"(?is)\bfinal output generation\b",
+        r"(?is)\bfinal output\b",
+        r"(?is)\bfinal answer\b",
+        r"(?is)\bfinal response\b",
+        r"最终答案",
+        r"最终回答",
+        r"最终回复",
+    ]
+
+    match_end = -1
+    for pattern in marker_patterns:
+        matches = list(re.finditer(pattern, cleaned))
+        if matches:
+            match_end = max(match_end, matches[-1].end())
+
+    if match_end != -1:
+        trailing = cleaned[match_end:]
+        trailing = re.sub(r"^[^\n]*\n+", "", trailing).strip()
+        if trailing:
+            cleaned = trailing
+
+    meta_line_patterns = [
+        r"^\*+\s*analyze the request.*$",
+        r"^\*+\s*determine the response content.*$",
+        r"^\*+\s*drafting the response.*$",
+        r"^\*+\s*finalizing the text.*$",
+        r"^\*+\s*review against constraints.*$",
+        r"^\*+\s*final output generation.*$",
+        r"^\*+\s*greeting:.*$",
+        r"^\*+\s*introduction:.*$",
+        r"^\*+\s*capabilities:.*$",
+        r"^\*+\s*constraint check:.*$",
+        r"^\*+\s*refinement:.*$",
+    ]
+    for pattern in meta_line_patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE | re.MULTILINE)
+
+    cleaned = re.sub(r"(?m)^\s*[*#-]{1,3}\s*", "", cleaned)
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"(?m)^\s*\[本次回答由本地模型生成\]\s*$", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _postprocess_local_answer(answer: str) -> str:
+    cleaned = answer.strip()
+    if not cleaned:
+        return ""
+
+    if local_model_family == "qwen3_5":
+        cleaned = _strip_reasoning_markers(cleaned)
+
+    return cleaned
 
 
 def decode_image(image_base64: str) -> Image.Image:
@@ -550,7 +614,7 @@ def generate_answer(messages: list[dict[str, Any]], image: Optional[Image.Image]
 
     input_length = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
     generated_ids = outputs[:, input_length:] if input_length else outputs
-    return _decode_generated_ids(generated_ids)
+    return _postprocess_local_answer(_decode_generated_ids(generated_ids))
 
 
 def _load_rag_if_enabled() -> Optional[AncientArchitectureRAG]:
