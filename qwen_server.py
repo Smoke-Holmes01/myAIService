@@ -483,6 +483,36 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
     else:
         user_text = question
 
+    if local_model_family == "qwen3_5":
+        system_message = {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": config.default_system_prompt},
+            ],
+        }
+
+        if image is None:
+            return [
+                system_message,
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                    ],
+                },
+            ]
+
+        return [
+            system_message,
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_text},
+                ],
+            },
+        ]
+
     if image is None:
         return [
             {"role": "system", "content": config.default_system_prompt},
