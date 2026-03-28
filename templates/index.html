@@ -58,7 +58,18 @@
                 </div>
                 <button class="ghost-button" id="clear-chat" type="button">清空对话</button>
             </header>
-
+  <!-- 古风数字人容器 - 放在消息区域上方 -->
+            <div id="digital-human" class="digital-human-container">
+                <div class="avatar-wrapper">
+                    <img id="avatar" src="{{ url_for('static', filename='gufeng_avatar.png') }}" alt="灵儿" class="avatar-img">
+                </div>
+                <div class="digital-human-info">
+                    <div class="digital-human-name">灵儿</div>
+                    <div id="speaking-bubble" class="speaking-bubble">
+                        <div class="bubble-content"></div>
+                    </div>
+                </div>
+            </div>
             <section class="messages" id="messages">
                 <article class="message assistant">
                     <div class="message-badge">AI</div>
@@ -86,7 +97,7 @@
                         <small>支持建筑识别</small>
                     </label>
 
-                    <div class="input-stack">
+                       <div class="input-stack">
                         <textarea
                             id="question-input"
                             rows="4"
@@ -110,6 +121,7 @@
         </article>
     </template>
 
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

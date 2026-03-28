@@ -22,9 +22,15 @@ from flask_cors import CORS
 from openai import OpenAI
 from PIL import Image
 from PIL import UnidentifiedImageError
+from transformers import AutoConfig
 from transformers import AutoProcessor
 from transformers import AutoTokenizer
 from transformers import Qwen2_5_VLForConditionalGeneration
+
+try:
+    from transformers import Qwen3_5ForConditionalGeneration
+except ImportError:  # pragma: no cover - depends on server-side transformers version
+    Qwen3_5ForConditionalGeneration = None
 
 from rag_retriever import AncientArchitectureRAG
 
@@ -81,7 +87,10 @@ def _get_torch_dtype(name: str) -> torch.dtype:
 
 @dataclass
 class ServerConfig:
-    model_path: str = os.getenv("MODEL_PATH", "/home/yy/models/qwen2.5-vl-72b")
+    local_model_path: str = os.getenv(
+        "LOCAL_MODEL_PATH",
+        os.getenv("MODEL_PATH", "/home/yy/models/qwen2.5-vl-72b"),
+    )
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = _get_env_int("PORT", 11435)
     use_remote_api: bool = _get_env_bool("USE_REMOTE_API", bool(os.getenv("SILICONFLOW_API_KEY")))
@@ -95,7 +104,8 @@ class ServerConfig:
     default_system_prompt: str = os.getenv(
         "SYSTEM_PROMPT",
         "你是一位专业的中国古建筑 AI 助手。请优先结合可用资料作答，表达清晰，"
-        "如果信息不足请明确说明不确定。",
+        "如果信息不足请明确说明不确定。默认使用自然中文段落回答，除非用户明确要求，"
+        "否则不要输出 Markdown 标题、列表符号、加粗符号或代码块。",
     )
     enable_rag: bool = _get_env_bool("ENABLE_RAG", True)
 
@@ -113,25 +123,56 @@ rag: Optional[AncientArchitectureRAG] = None
 image_matcher = None
 image_matcher_error: Optional[str] = None
 remote_client: Optional[OpenAI] = None
+local_model_family: str = ""
 
 
 def _remote_api_enabled() -> bool:
     return config.use_remote_api and bool(config.siliconflow_api_key)
 
 
-def _service_mode() -> str:
+def _local_model_ready() -> bool:
+    return model is not None and tokenizer is not None and processor is not None
+
+
+def _default_provider() -> str:
     if _remote_api_enabled():
         return "remote_api"
-    if model is not None:
+    if _local_model_ready():
         return "local_model"
     return "degraded"
 
 
-def resolve_input_device() -> str:
-    if _remote_api_enabled():
-        return "remote-api"
+def _service_mode() -> str:
+    return _default_provider()
 
-    if model is None:
+
+def _normalize_provider(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "api": "remote_api",
+        "remote": "remote_api",
+        "remote_api": "remote_api",
+        "siliconflow": "remote_api",
+        "local": "local_model",
+        "local_model": "local_model",
+        "本地": "local_model",
+        "本地模型": "local_model",
+    }
+
+    provider = mapping.get(normalized, _default_provider() if not normalized else "")
+    if provider not in {"remote_api", "local_model"}:
+        raise ValueError("invalid provider")
+
+    if provider == "remote_api" and not _remote_api_enabled():
+        raise RuntimeError("remote API is not ready")
+    if provider == "local_model" and not _local_model_ready():
+        raise RuntimeError("local model is not ready")
+
+    return provider
+
+
+def resolve_input_device() -> str:
+    if not _local_model_ready():
         return "cpu"
 
     try:
@@ -144,6 +185,32 @@ def resolve_input_device() -> str:
         return str(model_device)
 
     return "cpu"
+
+
+def _detect_local_model_family(model_path: str) -> str:
+    config_obj = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    model_type = str(getattr(config_obj, "model_type", "") or "").lower()
+    if model_type == "qwen3_5":
+        return "qwen3_5"
+    return "qwen2_5_vl"
+
+
+def _decode_generated_ids(generated_ids) -> str:
+    if processor is not None and hasattr(processor, "batch_decode"):
+        decoded = processor.batch_decode(
+            generated_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        if decoded:
+            return decoded[0].strip()
+
+    if tokenizer is not None:
+        decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        if decoded:
+            return decoded[0].strip()
+
+    return ""
 
 
 def decode_image(image_base64: str) -> Image.Image:
@@ -324,24 +391,57 @@ def get_image_matcher():
         raise RuntimeError(image_matcher_error) from exc
 
 
-def _format_match_answer(match_result: dict[str, Any]) -> str:
+def _describe_match_confidence(matches: list[dict[str, Any]]) -> str:
+    if len(matches) < 2:
+        return "当前只得到了一条有效候选结果，可以先把它当作主要参考。"
+
+    first_score = float(matches[0].get("score", 0.0))
+    second_score = float(matches[1].get("score", 0.0))
+    gap = first_score - second_score
+
+    if gap >= 0.15:
+        return "第一候选与后续候选有一定差距，当前结果相对更明确一些。"
+    if gap >= 0.05:
+        return "第一候选略优于其他候选，但仍建议结合实际构件形态再做确认。"
+    return "前几项候选结果比较接近，说明它们在轮廓上都有相似之处，建议把它们一起作为备选参考。"
+
+
+def _format_model_name(model_name: Any) -> str:
+    value = str(model_name).strip()
+    if not value:
+        return "未命名模型"
+    if value.endswith("号模型"):
+        return value
+    if value.lower().startswith("model "):
+        suffix = value.split(" ", 1)[1].strip()
+        return f"{suffix}号模型"
+    if value.lower().startswith("model"):
+        suffix = value[5:].strip()
+        return f"{suffix}号模型" if suffix else "模型"
+    return value
+
+
+def _format_match_answer(question: str, match_result: dict[str, Any]) -> str:
     matches = match_result.get("matches", [])
     if not matches:
-        return "No matching model was found."
+        return "我已经调用本地模型库做了匹配，但这次没有找到足够接近的候选结果。你可以换一张更清晰、主体更完整的图片后再试一次。"
 
     best_match = matches[0]
+    best_name = _format_model_name(best_match.get("model_name"))
+    candidate_names = [_format_model_name(item.get("model_name")) for item in matches[1:3]]
+    confidence_text = _describe_match_confidence(matches)
+
     lines = [
-        "I matched the uploaded image against the pre-rendered 3D model library.",
-        f"Best match: model {best_match['model_name']} (score {best_match['score']:.4f}).",
-        "Top candidates:",
+        "我已经调用本地 3D 模型库完成了这次匹配。",
+        f"从当前结果看，这张图片最接近库中的{best_name}。",
+        confidence_text,
     ]
 
-    for index, item in enumerate(matches, start=1):
-        view = item.get("best_view", {})
-        lines.append(
-            f"{index}. model {item['model_name']} | score {item['score']:.4f} | "
-            f"azimuth {view.get('azimuth')} | elevation {view.get('elevation')}"
-        )
+    if candidate_names:
+        lines.append(f"另外，{ '、'.join(candidate_names) }也比较接近，可以作为备选结果一起参考。")
+
+    if question:
+        lines.append("如果你愿意，我还可以继续把候选模型的编号、对应视角，或者更技术性的匹配信息展开给你。")
 
     return "\n".join(lines)
 
@@ -369,7 +469,7 @@ def _run_match_pipeline(question: str, image_base64: str, top_k: int) -> dict[st
 
     return {
         "question": question,
-        "answer": _format_match_answer(match_result),
+        "answer": _format_match_answer(question, match_result),
         "used_knowledge": False,
         "has_image": True,
         "used_matcher": True,
@@ -404,7 +504,22 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
 def generate_answer(messages: list[dict[str, Any]], image: Optional[Image.Image]) -> str:
     input_device = resolve_input_device()
 
-    if image is None:
+    if local_model_family == "qwen3_5" and image is None:
+        prompt_text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = tokenizer(prompt_text, return_tensors="pt").to(input_device)
+    elif local_model_family == "qwen3_5":
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(input_device)
+    elif image is None:
         prompt_text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -435,8 +550,7 @@ def generate_answer(messages: list[dict[str, Any]], image: Optional[Image.Image]
 
     input_length = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
     generated_ids = outputs[:, input_length:] if input_length else outputs
-    decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-    return decoded[0].strip()
+    return _decode_generated_ids(generated_ids)
 
 
 def _load_rag_if_enabled() -> Optional[AncientArchitectureRAG]:
@@ -453,41 +567,59 @@ def _load_rag_if_enabled() -> Optional[AncientArchitectureRAG]:
 
 
 def load_model() -> bool:
-    global model, tokenizer, processor, rag
+    global model, tokenizer, processor, rag, local_model_family
 
     rag = _load_rag_if_enabled()
-
     if _remote_api_enabled():
         logger.info(
-            "Remote API mode enabled. Using SiliconFlow model %s via %s",
+            "Remote API enabled. Using SiliconFlow model %s via %s",
             config.siliconflow_model,
             config.siliconflow_base_url,
         )
-        model = None
-        tokenizer = None
-        processor = None
-        return True
+    else:
+        logger.warning("Remote API is disabled or missing SILICONFLOW_API_KEY")
 
-    logger.info("Loading local model from: %s", config.model_path)
+    model = None
+    tokenizer = None
+    processor = None
+    local_model_family = ""
 
-    if not os.path.exists(config.model_path):
-        logger.error("Local model path does not exist: %s", config.model_path)
-        return False
+    if os.path.exists(config.local_model_path):
+        logger.info("Loading local model from: %s", config.local_model_path)
+        try:
+            local_model_family = _detect_local_model_family(config.local_model_path)
+            tokenizer = AutoTokenizer.from_pretrained(config.local_model_path, trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(config.local_model_path, trust_remote_code=True)
+            if local_model_family == "qwen3_5":
+                if Qwen3_5ForConditionalGeneration is None:
+                    raise RuntimeError(
+                        "Current transformers version does not support Qwen3.5. "
+                        "Please upgrade transformers on the server."
+                    )
+                model = Qwen3_5ForConditionalGeneration.from_pretrained(
+                    config.local_model_path,
+                    device_map="auto",
+                    torch_dtype=config.torch_dtype,
+                    trust_remote_code=True,
+                )
+            else:
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    config.local_model_path,
+                    device_map="auto",
+                    torch_dtype=config.torch_dtype,
+                    trust_remote_code=True,
+                )
+            logger.info("Local model loaded successfully")
+        except Exception:
+            logger.exception("Local model failed to load")
+            model = None
+            tokenizer = None
+            processor = None
+            local_model_family = ""
+    else:
+        logger.warning("Local model path does not exist: %s", config.local_model_path)
 
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_path, trust_remote_code=True)
-        processor = AutoProcessor.from_pretrained(config.model_path, trust_remote_code=True)
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            config.model_path,
-            device_map="auto",
-            torch_dtype=config.torch_dtype,
-            trust_remote_code=True,
-        )
-        logger.info("Local model loaded successfully")
-        return True
-    except Exception:
-        logger.exception("Local model failed to load")
-        return False
+    return _remote_api_enabled() or _local_model_ready()
 
 
 @app.route("/", methods=["GET"])
@@ -498,21 +630,39 @@ def index():
 @app.route("/api/ai/health", methods=["GET"])
 def health():
     matcher_assets_ready = _matcher_render_root().exists()
-    service_ready = _remote_api_enabled() or model is not None
+    remote_ready = _remote_api_enabled()
+    local_ready = _local_model_ready()
+    service_ready = remote_ready or local_ready
     return jsonify(
         {
             "status": "up" if service_ready else "degraded",
             "service": "Chinese Ancient Architecture AI Assistant",
             "service_mode": _service_mode(),
-            "model_loaded": model is not None or _remote_api_enabled(),
-            "remote_api_enabled": _remote_api_enabled(),
-            "remote_model": config.siliconflow_model if _remote_api_enabled() else None,
+            "default_provider": _default_provider(),
+            "model_loaded": local_ready or remote_ready,
+            "remote_api_enabled": remote_ready,
+            "remote_model": config.siliconflow_model if remote_ready else None,
+            "local_model_loaded": local_ready,
+            "local_model_path": config.local_model_path,
+            "local_model_family": local_model_family or None,
             "rag_loaded": rag is not None,
-            "model_path": config.model_path,
             "device": resolve_input_device(),
             "matcher_render_root": str(_matcher_render_root()),
             "matcher_assets_ready": matcher_assets_ready,
             "matcher_error": image_matcher_error,
+            "providers": {
+                "remote_api": {
+                    "enabled": remote_ready,
+                    "label": "API",
+                    "model": config.siliconflow_model if remote_ready else None,
+                },
+                "local_model": {
+                    "enabled": local_ready,
+                    "label": "本地模型",
+                    "model_path": config.local_model_path,
+                    "family": local_model_family or None,
+                },
+            },
         }
     )
 
@@ -546,19 +696,25 @@ def agent_match():
 
 @app.route("/api/ai/chat", methods=["POST"])
 def chat():
-    if not _remote_api_enabled() and (model is None or tokenizer is None or processor is None):
-        return jsonify({"error": "model is not ready"}), 503
-
     data = request.get_json(silent=True) or {}
     question = str(data.get("question", "")).strip()
     image_base64 = data.get("image")
     has_image = bool(image_base64)
+    provider = data.get("provider")
 
     if not question:
         return jsonify({"error": "question cannot be empty"}), 400
 
+    try:
+        selected_provider = _normalize_provider(provider)
+    except ValueError:
+        return jsonify({"error": "invalid provider"}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
     logger.info("Received question: %s", question)
     logger.info("Has image: %s", has_image)
+    logger.info("Selected provider: %s", selected_provider)
 
     try:
         image = decode_image(image_base64) if has_image else None
@@ -568,7 +724,7 @@ def chat():
 
     try:
         context = rag.get_context(question) if rag else ""
-        if _remote_api_enabled():
+        if selected_provider == "remote_api":
             answer = generate_remote_answer(
                 question=question,
                 context=context,
@@ -585,7 +741,8 @@ def chat():
             "answer": answer,
             "used_knowledge": bool(context),
             "has_image": has_image,
-            "service_mode": _service_mode(),
+            "service_mode": selected_provider,
+            "provider": selected_provider,
         }
         return app.response_class(
             response=json.dumps(response_body, ensure_ascii=False),
@@ -598,16 +755,24 @@ def chat():
 
 @app.route("/api/ai/chat/stream", methods=["POST"])
 def chat_stream():
-    if not _remote_api_enabled():
-        return jsonify({"error": "streaming is only available in remote API mode"}), 400
-
     data = request.get_json(silent=True) or {}
     question = str(data.get("question", "")).strip()
     image_base64 = data.get("image")
     has_image = bool(image_base64)
+    provider = data.get("provider")
 
     if not question:
         return jsonify({"error": "question cannot be empty"}), 400
+
+    try:
+        selected_provider = _normalize_provider(provider)
+    except ValueError:
+        return jsonify({"error": "invalid provider"}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+    if selected_provider != "remote_api":
+        return jsonify({"error": "streaming is only available for API mode"}), 400
 
     try:
         _validate_image_payload(image_base64 if has_image else None)
@@ -623,7 +788,8 @@ def chat_stream():
                 {
                     "type": "start",
                     "used_knowledge": bool(context),
-                    "service_mode": _service_mode(),
+                    "service_mode": selected_provider,
+                    "provider": selected_provider,
                 }
             )
 
@@ -641,7 +807,8 @@ def chat_stream():
                     "type": "done",
                     "answer": "".join(chunks),
                     "used_knowledge": bool(context),
-                    "service_mode": _service_mode(),
+                    "service_mode": selected_provider,
+                    "provider": selected_provider,
                 }
             )
         except Exception:

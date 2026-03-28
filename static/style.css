@@ -190,7 +190,146 @@ body::before {
 
 .chat-panel {
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+/* Final overrides for digital human layout */
+.digital-human-container {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin: 18px 28px 0;
+    padding: 18px 22px;
+    background: linear-gradient(135deg, rgba(254, 249, 230, 0.96) 0%, rgba(255, 250, 240, 0.98) 100%);
+    border: 1px solid rgba(232, 212, 168, 0.95);
+    border-radius: 26px;
+    box-shadow: 0 10px 30px rgba(91, 63, 27, 0.08);
+    overflow: hidden;
+}
+
+.avatar-wrapper {
+    position: relative;
+    width: clamp(92px, 10vw, 132px);
+    height: clamp(92px, 10vw, 132px);
+    flex: 0 0 auto;
+    border-radius: 24px;
+    overflow: hidden;
+    background: radial-gradient(circle at top, rgba(255, 219, 128, 0.45), rgba(220, 195, 146, 0.22));
+}
+
+.avatar-img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center top;
+    border-radius: 24px;
+    border: 2px solid rgba(255, 215, 0, 0.68);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.08);
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+#mouth-img {
+    position: absolute;
+    bottom: 16%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: clamp(18px, 22%, 28px);
+    height: auto;
+    z-index: 10;
+    pointer-events: none;
+}
+
+.digital-human-info {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.digital-human-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: #8f5c0f;
+    letter-spacing: 0.06em;
+    background: rgba(255, 215, 0, 0.18);
+    padding: 6px 12px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.digital-human-name::before {
+    content: "灵儿 ";
+    font-size: 12px;
+}
+
+.speaking-bubble {
+    width: min(100%, 460px);
+    background: rgba(255, 255, 255, 0.96);
+    border-radius: 18px;
+    padding: 10px 14px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+    border: 1px solid rgba(255, 215, 0, 0.75);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.digital-human-container.speaking .speaking-bubble {
+    opacity: 1;
+}
+
+.bubble-content {
+    font-size: 13px;
+    color: #5a4a2e;
+    line-height: 1.45;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.digital-human-container.speaking .avatar-img {
+    animation: gentleShake 0.4s ease-in-out infinite;
+}
+
+@keyframes gentleShake {
+    0%,
+    100% {
+        transform: translateY(0px);
+    }
+
+    50% {
+        transform: translateY(-2px);
+    }
+}
+
+@media (max-width: 720px) {
+    .digital-human-container {
+        align-items: flex-start;
+        margin: 10px 16px 0;
+        padding: 12px 14px;
+        border-radius: 20px;
+    }
+
+    .avatar-wrapper {
+        width: 64px;
+        height: 64px;
+    }
+
+    #mouth-img {
+        width: 18px;
+    }
+
+    .digital-human-name {
+        font-size: 12px;
+        padding: 4px 8px;
+    }
+
+    .bubble-content {
+        font-size: 11px;
+        max-width: 180px;
+    }
 }
 
 .chat-header {
@@ -205,6 +344,7 @@ body::before {
 .messages {
     padding: 24px 28px;
     overflow: auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 18px;
@@ -260,6 +400,28 @@ body::before {
 .message-body p:last-child {
     margin-bottom: 0;
 }
+
+.message-body strong,
+.message-body b,
+.message-body em,
+.message-body i {
+    font-weight: 800;
+    color: var(--accent);
+    font-style: normal;
+}
+
+.message-body ul,
+.message-body ol {
+    margin: 0 0 12px 0;
+    padding-left: 24px;
+}
+
+.message-body li {
+    margin-bottom: 6px;
+    font-weight: 700;
+    color: var(--accent);
+}
+
 
 .composer-panel {
     padding: 18px 24px 24px;
@@ -472,5 +634,182 @@ textarea:focus {
     .preview-card {
         grid-template-columns: 1fr;
         justify-items: start;
+    }
+
+    /* ==================== 数字人样式 - 紧凑版 ==================== */
+
+    /* 数字人容器 - 放在聊天区域内 */
+    .digital-human-container {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        margin-bottom: 16px;
+        background: linear-gradient(135deg, #fef9e6 0%, #fffaf0 100%);
+        border-radius: 50px;
+        border: 1px solid #e8d4a8;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .avatar-wrapper {
+        position: relative;
+        width: 2px;
+        height: 2px;
+        flex-shrink: 0;
+    }
+
+    .avatar-img {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 2px solid #ffd700;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+        transition: all 0.3s ease;
+    }
+
+    /* 嘴巴图片 */
+    #mouth-img {
+        position: absolute;
+        bottom: 5px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 20px;
+        height: auto;
+        transition: all 0.05s linear;
+        z-index: 10;
+        pointer-events: none;
+    }
+
+    .digital-human-info {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+
+    .digital-human-name {
+        font-size: 14px;
+        font-weight: bold;
+        color: #b8860b;
+        letter-spacing: 1px;
+        background: rgba(255, 215, 0, 0.2);
+        padding: 2px 10px;
+        border-radius: 20px;
+        white-space: nowrap;
+    }
+
+    .digital-human-name::before {
+        content: "🌸 ";
+        font-size: 12px;
+    }
+
+    /* 说话气泡 */
+    .speaking-bubble {
+        background: #fff;
+        border-radius: 18px;
+        padding: 4px 12px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+        border: 1px solid #ffd700;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        max-width: 260px;
+        flex: 1;
+    }
+
+    .digital-human-container.speaking .speaking-bubble {
+        opacity: 1;
+    }
+
+    .bubble-content {
+        font-size: 12px;
+        color: #5a4a2e;
+        line-height: 1.3;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    /* 说话时的动画效果 */
+    .digital-human-container.speaking .avatar-img {
+        animation: gentleShake 0.4s ease-in-out infinite;
+    }
+
+    @keyframes gentleShake {
+
+        0%,
+        100% {
+            transform: translateY(0px);
+        }
+
+        50% {
+            transform: translateY(-2px);
+        }
+    }
+
+    /* 自动播放按钮样式 */
+    .voice-toggle-btn {
+        background: #f5f0e6 !important;
+        border: 1px solid #e8d4a8 !important;
+        font-size: 13px !important;
+        padding: 6px 12px !important;
+    }
+
+    .voice-toggle-btn.auto-play {
+        background: #ffd700 !important;
+        color: #5a3e1b !important;
+        border-color: #b8860b !important;
+    }
+
+    .header-actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+    }
+
+    /* 播放按钮样式（在消息中） */
+    .play-btn {
+        background: #f5f0e6;
+        border: 1px solid #e8d4a8;
+        border-radius: 20px;
+        padding: 2px 10px;
+        margin-left: 10px;
+        cursor: pointer;
+        font-size: 11px;
+        transition: all 0.2s;
+        color: #5a3e1b;
+    }
+
+    .play-btn:hover {
+        background: #ffd700;
+        border-color: #b8860b;
+    }
+
+    /* 响应式调整 */
+    @media (max-width: 768px) {
+        .digital-human-container {
+            padding: 6px 12px;
+        }
+
+        .avatar-wrapper {
+            width: 32px;
+            height: 32px;
+        }
+
+        #mouth-img {
+            width: 16px;
+            bottom: 3px;
+        }
+
+        .digital-human-name {
+            font-size: 12px;
+            padding: 1px 8px;
+        }
+
+        .bubble-content {
+            font-size: 11px;
+            max-width: 150px;
+        }
     }
 }
