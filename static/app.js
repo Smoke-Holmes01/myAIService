@@ -13,6 +13,8 @@ const elements = {
   statusDot: document.getElementById("status-dot"),
   statusText: document.getElementById("status-text"),
   statusMeta: document.getElementById("status-meta"),
+  providerSwitch: document.getElementById("provider-switch"),
+  providerRadios: document.querySelectorAll('input[name="provider"]'),
   template: document.getElementById("message-template"),
 };
 
@@ -115,6 +117,126 @@ const bubbleContent = document.querySelector(".bubble-content");
 
 function scrollMessagesToBottom() {
   elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
+function ensureProviderSwitch() {
+  if (!elements.providerSwitch) {
+    const inputStack = document.querySelector(".input-stack");
+    const composerActions = inputStack ? inputStack.querySelector(".composer-actions") : null;
+    if (inputStack && composerActions) {
+      const switchNode = document.createElement("div");
+      switchNode.className = "provider-switch";
+      switchNode.id = "provider-switch";
+      switchNode.innerHTML = `
+        <span class="provider-label">推理来源</span>
+        <label class="provider-option" data-provider="remote_api">
+          <input type="radio" name="provider" value="remote_api" checked>
+          <span>API</span>
+        </label>
+        <label class="provider-option" data-provider="local_model">
+          <input type="radio" name="provider" value="local_model">
+          <span>本地模型</span>
+        </label>
+      `;
+      inputStack.insertBefore(switchNode, composerActions);
+      elements.providerSwitch = switchNode;
+      elements.providerRadios = switchNode.querySelectorAll('input[name="provider"]');
+    }
+  }
+
+  if (!document.getElementById("provider-switch-style")) {
+    const style = document.createElement("style");
+    style.id = "provider-switch-style";
+    style.textContent = `
+      .provider-switch {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .provider-label {
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .provider-option {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 248, 235, 0.88);
+        cursor: pointer;
+        transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+      }
+      .provider-option input {
+        margin: 0;
+      }
+      .provider-option.is-active {
+        border-color: rgba(159, 47, 31, 0.28);
+        background: rgba(159, 47, 31, 0.1);
+        color: var(--accent);
+      }
+      .provider-option.is-disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+}
+
+function getSelectedProvider() {
+  const checked = Array.from(elements.providerRadios || []).find((radio) => radio.checked);
+  return checked ? checked.value : "remote_api";
+}
+
+function setSelectedProvider(provider) {
+  Array.from(elements.providerRadios || []).forEach((radio) => {
+    radio.checked = radio.value === provider;
+  });
+  refreshProviderSwitch();
+}
+
+function refreshProviderSwitch() {
+  if (!elements.providerSwitch) {
+    return;
+  }
+
+  elements.providerSwitch.querySelectorAll(".provider-option").forEach((option) => {
+    const radio = option.querySelector('input[name="provider"]');
+    const isActive = radio && radio.checked;
+    const isDisabled = radio && radio.disabled;
+    option.classList.toggle("is-active", Boolean(isActive));
+    option.classList.toggle("is-disabled", Boolean(isDisabled));
+  });
+}
+
+function updateProviderAvailability(data) {
+  const providers = data && data.providers ? data.providers : {};
+  const remoteEnabled = Boolean(providers.remote_api && providers.remote_api.enabled);
+  const localEnabled = Boolean(providers.local_model && providers.local_model.enabled);
+
+  Array.from(elements.providerRadios || []).forEach((radio) => {
+    if (radio.value === "remote_api") {
+      radio.disabled = !remoteEnabled;
+    }
+    if (radio.value === "local_model") {
+      radio.disabled = !localEnabled;
+    }
+  });
+
+  const selectedProvider = getSelectedProvider();
+  if ((selectedProvider === "remote_api" && !remoteEnabled) || (selectedProvider === "local_model" && !localEnabled)) {
+    const fallbackProvider = data && data.default_provider && data.default_provider !== "degraded"
+      ? data.default_provider
+      : (remoteEnabled ? "remote_api" : "local_model");
+    if (fallbackProvider) {
+      setSelectedProvider(fallbackProvider);
+    }
+  }
+
+  refreshProviderSwitch();
 }
 
 function attachPlayButton(body, text) {
@@ -284,13 +406,14 @@ async function updateHealthStatus() {
   }
 }
 
-async function sendStreamingChat({ question, imageBase64, loadingMessage }) {
+async function sendStreamingChat({ question, imageBase64, loadingMessage, provider }) {
   const response = await fetch("/api/ai/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      provider,
       question,
       image: imageBase64 || undefined,
     }),
@@ -359,6 +482,34 @@ async function sendStreamingChat({ question, imageBase64, loadingMessage }) {
   }
 }
 
+async function sendStandardChat({ question, imageBase64, loadingMessage, provider }) {
+  const response = await fetch("/api/ai/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      provider,
+      question,
+      image: imageBase64 || undefined,
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || "请求失败");
+  }
+
+  const providerNote = provider === "local_model"
+    ? "[本次回答由本地模型生成]"
+    : "[本次回答由 API 生成]";
+  const finalText = data.used_knowledge
+    ? `${data.answer}\n\n[本次回答已结合知识库检索结果]\n${providerNote}`
+    : `${data.answer}\n\n${providerNote}`;
+
+  finalizeAssistantMessage(loadingMessage, finalText, { autoPlay });
+}
+
 elements.imageInput.addEventListener("change", async (event) => {
   const [file] = event.target.files;
   if (!file) {
@@ -401,6 +552,7 @@ elements.form.addEventListener("submit", async (event) => {
 
   const effectiveImageState = getEffectiveImageState();
   const hasImage = Boolean(effectiveImageState.imageBase64);
+  const selectedProvider = getSelectedProvider();
   const userText = selectedImageName
     ? `${question}\n\n[已上传图片：${selectedImageName}]`
     : effectiveImageState.usingConversationImage
@@ -454,11 +606,21 @@ elements.form.addEventListener("submit", async (event) => {
       );
       lastToolMode = "matcher";
     } else {
-      await sendStreamingChat({
-        question,
-        imageBase64: effectiveImageState.imageBase64,
-        loadingMessage,
-      });
+      if (selectedProvider === "remote_api") {
+        await sendStreamingChat({
+          question,
+          imageBase64: effectiveImageState.imageBase64,
+          loadingMessage,
+          provider: selectedProvider,
+        });
+      } else {
+        await sendStandardChat({
+          question,
+          imageBase64: effectiveImageState.imageBase64,
+          loadingMessage,
+          provider: selectedProvider,
+        });
+      }
       lastToolMode = "chat";
     }
   } catch (error) {
@@ -744,6 +906,40 @@ if (voiceToggle) {
     voiceToggle.textContent = "自动播放 (开)";
   }
 }
+
+async function legacyUpdateHealthStatus() {
+  try {
+    const response = await fetch("/api/ai/health");
+    const data = await response.json();
+    const isOnline = response.ok && data.status === "up";
+    const status = isOnline ? "服务在线，可开始演示" : "服务未就绪";
+
+    updateProviderAvailability(data);
+
+    const remoteMeta = data.remote_api_enabled
+      ? `API: 已就绪 (${data.remote_model || "未命名模型"})`
+      : "API: 未就绪";
+    const localMeta = data.local_model_loaded
+      ? `本地: 已就绪 (${data.local_model_path || "未配置路径"})`
+      : "本地: 未就绪";
+
+    elements.statusDot.classList.remove("offline", "online");
+    elements.statusDot.classList.add(isOnline ? "online" : "offline");
+    elements.statusText.textContent = status;
+    elements.statusMeta.textContent = `设备: ${data.device || "未知"} | RAG: ${data.rag_loaded ? "已启用" : "未启用"} | ${remoteMeta} | ${localMeta}`;
+  } catch (error) {
+    elements.statusDot.classList.remove("online");
+    elements.statusDot.classList.add("offline");
+    elements.statusText.textContent = "无法连接 AI 服务";
+    elements.statusMeta.textContent = "请确认 qwen_server.py 已启动，并检查服务端口是否可访问。";
+  }
+}
+
+ensureProviderSwitch();
+Array.from(elements.providerRadios || []).forEach((radio) => {
+  radio.addEventListener("change", refreshProviderSwitch);
+});
+refreshProviderSwitch();
 
 updateHealthStatus();
 window.setInterval(updateHealthStatus, 30000);

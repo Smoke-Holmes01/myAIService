@@ -81,7 +81,10 @@ def _get_torch_dtype(name: str) -> torch.dtype:
 
 @dataclass
 class ServerConfig:
-    model_path: str = os.getenv("MODEL_PATH", "/home/yy/models/qwen2.5-vl-72b")
+    local_model_path: str = os.getenv(
+        "LOCAL_MODEL_PATH",
+        os.getenv("MODEL_PATH", "/home/yy/models/qwen2.5-vl-72b"),
+    )
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = _get_env_int("PORT", 11435)
     use_remote_api: bool = _get_env_bool("USE_REMOTE_API", bool(os.getenv("SILICONFLOW_API_KEY")))
@@ -120,19 +123,49 @@ def _remote_api_enabled() -> bool:
     return config.use_remote_api and bool(config.siliconflow_api_key)
 
 
-def _service_mode() -> str:
+def _local_model_ready() -> bool:
+    return model is not None and tokenizer is not None and processor is not None
+
+
+def _default_provider() -> str:
     if _remote_api_enabled():
         return "remote_api"
-    if model is not None:
+    if _local_model_ready():
         return "local_model"
     return "degraded"
 
 
-def resolve_input_device() -> str:
-    if _remote_api_enabled():
-        return "remote-api"
+def _service_mode() -> str:
+    return _default_provider()
 
-    if model is None:
+
+def _normalize_provider(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "api": "remote_api",
+        "remote": "remote_api",
+        "remote_api": "remote_api",
+        "siliconflow": "remote_api",
+        "local": "local_model",
+        "local_model": "local_model",
+        "本地": "local_model",
+        "本地模型": "local_model",
+    }
+
+    provider = mapping.get(normalized, _default_provider() if not normalized else "")
+    if provider not in {"remote_api", "local_model"}:
+        raise ValueError("invalid provider")
+
+    if provider == "remote_api" and not _remote_api_enabled():
+        raise RuntimeError("remote API is not ready")
+    if provider == "local_model" and not _local_model_ready():
+        raise RuntimeError("local model is not ready")
+
+    return provider
+
+
+def resolve_input_device() -> str:
+    if not _local_model_ready():
         return "cpu"
 
     try:
@@ -490,38 +523,40 @@ def load_model() -> bool:
     global model, tokenizer, processor, rag
 
     rag = _load_rag_if_enabled()
-
     if _remote_api_enabled():
         logger.info(
-            "Remote API mode enabled. Using SiliconFlow model %s via %s",
+            "Remote API enabled. Using SiliconFlow model %s via %s",
             config.siliconflow_model,
             config.siliconflow_base_url,
         )
-        model = None
-        tokenizer = None
-        processor = None
-        return True
+    else:
+        logger.warning("Remote API is disabled or missing SILICONFLOW_API_KEY")
 
-    logger.info("Loading local model from: %s", config.model_path)
+    model = None
+    tokenizer = None
+    processor = None
 
-    if not os.path.exists(config.model_path):
-        logger.error("Local model path does not exist: %s", config.model_path)
-        return False
+    if os.path.exists(config.local_model_path):
+        logger.info("Loading local model from: %s", config.local_model_path)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(config.local_model_path, trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(config.local_model_path, trust_remote_code=True)
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                config.local_model_path,
+                device_map="auto",
+                torch_dtype=config.torch_dtype,
+                trust_remote_code=True,
+            )
+            logger.info("Local model loaded successfully")
+        except Exception:
+            logger.exception("Local model failed to load")
+            model = None
+            tokenizer = None
+            processor = None
+    else:
+        logger.warning("Local model path does not exist: %s", config.local_model_path)
 
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_path, trust_remote_code=True)
-        processor = AutoProcessor.from_pretrained(config.model_path, trust_remote_code=True)
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            config.model_path,
-            device_map="auto",
-            torch_dtype=config.torch_dtype,
-            trust_remote_code=True,
-        )
-        logger.info("Local model loaded successfully")
-        return True
-    except Exception:
-        logger.exception("Local model failed to load")
-        return False
+    return _remote_api_enabled() or _local_model_ready()
 
 
 @app.route("/", methods=["GET"])
@@ -532,21 +567,37 @@ def index():
 @app.route("/api/ai/health", methods=["GET"])
 def health():
     matcher_assets_ready = _matcher_render_root().exists()
-    service_ready = _remote_api_enabled() or model is not None
+    remote_ready = _remote_api_enabled()
+    local_ready = _local_model_ready()
+    service_ready = remote_ready or local_ready
     return jsonify(
         {
             "status": "up" if service_ready else "degraded",
             "service": "Chinese Ancient Architecture AI Assistant",
             "service_mode": _service_mode(),
-            "model_loaded": model is not None or _remote_api_enabled(),
-            "remote_api_enabled": _remote_api_enabled(),
-            "remote_model": config.siliconflow_model if _remote_api_enabled() else None,
+            "default_provider": _default_provider(),
+            "model_loaded": local_ready or remote_ready,
+            "remote_api_enabled": remote_ready,
+            "remote_model": config.siliconflow_model if remote_ready else None,
+            "local_model_loaded": local_ready,
+            "local_model_path": config.local_model_path,
             "rag_loaded": rag is not None,
-            "model_path": config.model_path,
             "device": resolve_input_device(),
             "matcher_render_root": str(_matcher_render_root()),
             "matcher_assets_ready": matcher_assets_ready,
             "matcher_error": image_matcher_error,
+            "providers": {
+                "remote_api": {
+                    "enabled": remote_ready,
+                    "label": "API",
+                    "model": config.siliconflow_model if remote_ready else None,
+                },
+                "local_model": {
+                    "enabled": local_ready,
+                    "label": "本地模型",
+                    "model_path": config.local_model_path,
+                },
+            },
         }
     )
 
@@ -580,19 +631,25 @@ def agent_match():
 
 @app.route("/api/ai/chat", methods=["POST"])
 def chat():
-    if not _remote_api_enabled() and (model is None or tokenizer is None or processor is None):
-        return jsonify({"error": "model is not ready"}), 503
-
     data = request.get_json(silent=True) or {}
     question = str(data.get("question", "")).strip()
     image_base64 = data.get("image")
     has_image = bool(image_base64)
+    provider = data.get("provider")
 
     if not question:
         return jsonify({"error": "question cannot be empty"}), 400
 
+    try:
+        selected_provider = _normalize_provider(provider)
+    except ValueError:
+        return jsonify({"error": "invalid provider"}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
     logger.info("Received question: %s", question)
     logger.info("Has image: %s", has_image)
+    logger.info("Selected provider: %s", selected_provider)
 
     try:
         image = decode_image(image_base64) if has_image else None
@@ -602,7 +659,7 @@ def chat():
 
     try:
         context = rag.get_context(question) if rag else ""
-        if _remote_api_enabled():
+        if selected_provider == "remote_api":
             answer = generate_remote_answer(
                 question=question,
                 context=context,
@@ -619,7 +676,8 @@ def chat():
             "answer": answer,
             "used_knowledge": bool(context),
             "has_image": has_image,
-            "service_mode": _service_mode(),
+            "service_mode": selected_provider,
+            "provider": selected_provider,
         }
         return app.response_class(
             response=json.dumps(response_body, ensure_ascii=False),
@@ -632,16 +690,24 @@ def chat():
 
 @app.route("/api/ai/chat/stream", methods=["POST"])
 def chat_stream():
-    if not _remote_api_enabled():
-        return jsonify({"error": "streaming is only available in remote API mode"}), 400
-
     data = request.get_json(silent=True) or {}
     question = str(data.get("question", "")).strip()
     image_base64 = data.get("image")
     has_image = bool(image_base64)
+    provider = data.get("provider")
 
     if not question:
         return jsonify({"error": "question cannot be empty"}), 400
+
+    try:
+        selected_provider = _normalize_provider(provider)
+    except ValueError:
+        return jsonify({"error": "invalid provider"}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+    if selected_provider != "remote_api":
+        return jsonify({"error": "streaming is only available for API mode"}), 400
 
     try:
         _validate_image_payload(image_base64 if has_image else None)
@@ -657,7 +723,8 @@ def chat_stream():
                 {
                     "type": "start",
                     "used_knowledge": bool(context),
-                    "service_mode": _service_mode(),
+                    "service_mode": selected_provider,
+                    "provider": selected_provider,
                 }
             )
 
@@ -675,7 +742,8 @@ def chat_stream():
                     "type": "done",
                     "answer": "".join(chunks),
                     "used_knowledge": bool(context),
-                    "service_mode": _service_mode(),
+                    "service_mode": selected_provider,
+                    "provider": selected_provider,
                 }
             )
         except Exception:
