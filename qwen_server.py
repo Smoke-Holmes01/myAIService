@@ -22,9 +22,15 @@ from flask_cors import CORS
 from openai import OpenAI
 from PIL import Image
 from PIL import UnidentifiedImageError
+from transformers import AutoConfig
 from transformers import AutoProcessor
 from transformers import AutoTokenizer
 from transformers import Qwen2_5_VLForConditionalGeneration
+
+try:
+    from transformers import Qwen3_5ForConditionalGeneration
+except ImportError:  # pragma: no cover - depends on server-side transformers version
+    Qwen3_5ForConditionalGeneration = None
 
 from rag_retriever import AncientArchitectureRAG
 
@@ -117,6 +123,7 @@ rag: Optional[AncientArchitectureRAG] = None
 image_matcher = None
 image_matcher_error: Optional[str] = None
 remote_client: Optional[OpenAI] = None
+local_model_family: str = ""
 
 
 def _remote_api_enabled() -> bool:
@@ -178,6 +185,32 @@ def resolve_input_device() -> str:
         return str(model_device)
 
     return "cpu"
+
+
+def _detect_local_model_family(model_path: str) -> str:
+    config_obj = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    model_type = str(getattr(config_obj, "model_type", "") or "").lower()
+    if model_type == "qwen3_5":
+        return "qwen3_5"
+    return "qwen2_5_vl"
+
+
+def _decode_generated_ids(generated_ids) -> str:
+    if processor is not None and hasattr(processor, "batch_decode"):
+        decoded = processor.batch_decode(
+            generated_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        if decoded:
+            return decoded[0].strip()
+
+    if tokenizer is not None:
+        decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        if decoded:
+            return decoded[0].strip()
+
+    return ""
 
 
 def decode_image(image_base64: str) -> Image.Image:
@@ -471,7 +504,15 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
 def generate_answer(messages: list[dict[str, Any]], image: Optional[Image.Image]) -> str:
     input_device = resolve_input_device()
 
-    if image is None:
+    if local_model_family == "qwen3_5":
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(input_device)
+    elif image is None:
         prompt_text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -502,8 +543,7 @@ def generate_answer(messages: list[dict[str, Any]], image: Optional[Image.Image]
 
     input_length = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
     generated_ids = outputs[:, input_length:] if input_length else outputs
-    decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-    return decoded[0].strip()
+    return _decode_generated_ids(generated_ids)
 
 
 def _load_rag_if_enabled() -> Optional[AncientArchitectureRAG]:
@@ -520,7 +560,7 @@ def _load_rag_if_enabled() -> Optional[AncientArchitectureRAG]:
 
 
 def load_model() -> bool:
-    global model, tokenizer, processor, rag
+    global model, tokenizer, processor, rag, local_model_family
 
     rag = _load_rag_if_enabled()
     if _remote_api_enabled():
@@ -535,24 +575,40 @@ def load_model() -> bool:
     model = None
     tokenizer = None
     processor = None
+    local_model_family = ""
 
     if os.path.exists(config.local_model_path):
         logger.info("Loading local model from: %s", config.local_model_path)
         try:
+            local_model_family = _detect_local_model_family(config.local_model_path)
             tokenizer = AutoTokenizer.from_pretrained(config.local_model_path, trust_remote_code=True)
             processor = AutoProcessor.from_pretrained(config.local_model_path, trust_remote_code=True)
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                config.local_model_path,
-                device_map="auto",
-                torch_dtype=config.torch_dtype,
-                trust_remote_code=True,
-            )
+            if local_model_family == "qwen3_5":
+                if Qwen3_5ForConditionalGeneration is None:
+                    raise RuntimeError(
+                        "Current transformers version does not support Qwen3.5. "
+                        "Please upgrade transformers on the server."
+                    )
+                model = Qwen3_5ForConditionalGeneration.from_pretrained(
+                    config.local_model_path,
+                    device_map="auto",
+                    torch_dtype=config.torch_dtype,
+                    trust_remote_code=True,
+                )
+            else:
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    config.local_model_path,
+                    device_map="auto",
+                    torch_dtype=config.torch_dtype,
+                    trust_remote_code=True,
+                )
             logger.info("Local model loaded successfully")
         except Exception:
             logger.exception("Local model failed to load")
             model = None
             tokenizer = None
             processor = None
+            local_model_family = ""
     else:
         logger.warning("Local model path does not exist: %s", config.local_model_path)
 
@@ -581,6 +637,7 @@ def health():
             "remote_model": config.siliconflow_model if remote_ready else None,
             "local_model_loaded": local_ready,
             "local_model_path": config.local_model_path,
+            "local_model_family": local_model_family or None,
             "rag_loaded": rag is not None,
             "device": resolve_input_device(),
             "matcher_render_root": str(_matcher_render_root()),
@@ -596,6 +653,7 @@ def health():
                     "enabled": local_ready,
                     "label": "本地模型",
                     "model_path": config.local_model_path,
+                    "family": local_model_family or None,
                 },
             },
         }
