@@ -483,36 +483,6 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
     else:
         user_text = question
 
-    if local_model_family == "qwen3_5":
-        system_message = {
-            "role": "system",
-            "content": [
-                {"type": "text", "text": config.default_system_prompt},
-            ],
-        }
-
-        if image is None:
-            return [
-                system_message,
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_text},
-                    ],
-                },
-            ]
-
-        return [
-            system_message,
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": user_text},
-                ],
-            },
-        ]
-
     if image is None:
         return [
             {"role": "system", "content": config.default_system_prompt},
@@ -534,7 +504,14 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
 def generate_answer(messages: list[dict[str, Any]], image: Optional[Image.Image]) -> str:
     input_device = resolve_input_device()
 
-    if local_model_family == "qwen3_5":
+    if local_model_family == "qwen3_5" and image is None:
+        prompt_text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = tokenizer(prompt_text, return_tensors="pt").to(input_device)
+    elif local_model_family == "qwen3_5":
         inputs = processor.apply_chat_template(
             messages,
             tokenize=True,
