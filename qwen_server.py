@@ -621,6 +621,23 @@ def build_messages(question: str, context: str, image: Optional[Image.Image]) ->
             {"role": "user", "content": user_text},
         ]
 
+    if local_model_family == "qwen3_5":
+        return [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": _local_system_prompt()},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_text},
+                ],
+            },
+        ]
+
     return [
         {"role": "system", "content": _local_system_prompt()},
         {
